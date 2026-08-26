@@ -29,6 +29,13 @@ t.test("control and whitespace keys") {
     t.expectEqual(code(MacVirtualKey.tab), 0x0F)
 }
 
+t.test("ISO Section maps to KEY_102ND (French <> next to Left Shift)") {
+    t.expectEqual(MacVirtualKey.isoSection, 0x0A)          // kVK_ISO_Section
+    t.expectEqual(code(MacVirtualKey.isoSection), 0x56)    // set-1 KEY_102ND
+    t.expectEqual(SpiceScancode.cocoaSpiceCode(forMacVirtualKey: MacVirtualKey.isoSection), 0x56)
+    t.expect(!SpiceScancode.isExtended(code(MacVirtualKey.isoSection)!), "102nd is not extended")
+}
+
 t.test("left-hand modifiers are non-extended") {
     t.expectEqual(code(MacVirtualKey.control), 0x1D)
     t.expectEqual(code(MacVirtualKey.shift), 0x2A)

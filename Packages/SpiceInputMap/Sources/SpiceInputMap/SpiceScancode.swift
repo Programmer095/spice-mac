@@ -87,6 +87,8 @@ public enum SpiceScancode {
         MacVirtualKey.semicolon: 0x27, MacVirtualKey.quote: 0x28,
         MacVirtualKey.grave: 0x29, MacVirtualKey.backslash: 0x2B,
         MacVirtualKey.comma: 0x33, MacVirtualKey.period: 0x34, MacVirtualKey.slash: 0x35,
+        // ISO 102nd key (next to Left Shift): <> on FR/DE/…; missing on ANSI.
+        MacVirtualKey.isoSection: 0x56,
 
         // Control / whitespace
         MacVirtualKey.escape: 0x01, MacVirtualKey.delete: 0x0E, MacVirtualKey.tab: 0x0F,

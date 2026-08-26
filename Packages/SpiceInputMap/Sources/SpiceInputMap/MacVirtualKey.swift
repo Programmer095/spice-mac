@@ -16,6 +16,9 @@ public enum MacVirtualKey {
     public static let x: UInt16 = 0x07
     public static let c: UInt16 = 0x08
     public static let v: UInt16 = 0x09
+    /// ISO key left of Z (French `<>` / German `<>`); `kVK_ISO_Section`.
+    /// Absent on ANSI keyboards — macOS only delivers this on ISO hardware.
+    public static let isoSection: UInt16 = 0x0A
     public static let b: UInt16 = 0x0B
     public static let q: UInt16 = 0x0C
     public static let w: UInt16 = 0x0D
