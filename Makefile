@@ -24,9 +24,10 @@ build: ## Build and assemble build/SpiceMac.app
 run: ## Open build/SpiceMac.app
 	@open build/SpiceMac.app
 
-test: ## Run the dependency-free check runners (vvcheck + inputcheck)
+test: ## Run the dependency-free check runners (vvcheck + inputcheck + scalecheck)
 	@( cd Packages/VVConfig && swift run vvcheck )
 	@( cd Packages/SpiceInputMap && swift run inputcheck )
+	@( cd Packages/DisplayScale && swift run scalecheck )
 
 all: doctor setup build ## Doctor, fetch the sysroot, and build (first-time setup)
 

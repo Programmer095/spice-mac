@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 import Foundation
+import DisplayScale
 
 /// App preferences, backed by `UserDefaults`.
 enum Preferences {
@@ -35,6 +36,18 @@ enum Preferences {
     static var trashConnectionFileAfterUse: Bool {
         get { (UserDefaults.standard.object(forKey: trashAfterUseKey) as? Bool) ?? true }
         set { UserDefaults.standard.set(newValue, forKey: trashAfterUseKey) }
+    }
+
+    private static let displayZoomKey = "DisplayZoom"
+
+    /// The zoom level a NEWLY opened window starts at: host physical pixels per
+    /// guest pixel. A seed, NOT a live global — zoom belongs to the window (see
+    /// `SpiceWindowController.displayZoom`), so writing this notifies nobody.
+    /// Default `.automatic` (zoom = backingScaleFactor), and raw 0 == `.automatic`,
+    /// so a missing key reads as automatic.
+    static var displayZoom: DisplayZoom {
+        get { DisplayZoom(rawValue: UserDefaults.standard.integer(forKey: displayZoomKey)) ?? .automatic }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: displayZoomKey) }
     }
 }
 

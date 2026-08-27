@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 import AppKit
+import DisplayScale
 
 /// Builds the application main menu programmatically (no nib). Connection-specific
 /// actions (release cursor, send Ctrl-Alt-Del, USB) use `nil` targets so they
@@ -84,6 +85,8 @@ enum MainMenu {
                          action: #selector(NSWindow.toggleFullScreen(_:)), keyEquivalent: "f")
             .keyEquivalentModifierMask = [.control, .command]
         viewMenu.addItem(.separator())
+        viewMenu.addItem(zoomMenuItem())
+        viewMenu.addItem(.separator())
         let hideCursor = NSMenuItem(title: "Hide Mac Cursor",
                                     action: #selector(AppDelegate.toggleHideMacCursor(_:)), keyEquivalent: "")
         hideCursor.state = Preferences.hideHostCursor ? .on : .off
@@ -103,4 +106,57 @@ enum MainMenu {
 
     /// The USB submenu, populated dynamically by the front `SpiceWindowController`.
     static weak var usbSubmenu: NSMenu?
+
+    /// View ▸ Zoom — how many host physical pixels each guest pixel occupies.
+    ///
+    /// Per-window, like the Connection menu: `nil` targets, so the items travel the
+    /// responder chain to the front `SpiceWindowController`.
+    ///
+    /// Shortcuts use ⌃⌘ (matching ⌃⌘F and ⌃⌥R) rather than plain ⌘, so ⌘+ / ⌘- / ⌘0
+    /// keep reaching the guest as Super-plus / Super-minus / Super-zero — AppKit
+    /// offers key-downs to the main menu before the responder chain.
+    private static func zoomMenuItem() -> NSMenuItem {
+        let item = NSMenuItem(title: "Zoom", action: nil, keyEquivalent: "")
+        let menu = NSMenu(title: "Zoom")
+        item.submenu = menu
+
+        // "+" is a SHIFTED character on most layouts, so such an item only matches
+        // while Shift is down. Ship the pretty ⌃⌘+ item for display plus a hidden
+        // twin on "=" (allowsKeyEquivalentWhenHidden keeps its shortcut live).
+        let zoomIn = NSMenuItem(title: "Zoom In",
+                                action: #selector(SpiceWindowController.zoomIn(_:)), keyEquivalent: "+")
+        zoomIn.keyEquivalentModifierMask = [.control, .command]
+        menu.addItem(zoomIn)
+        let zoomInUnshifted = NSMenuItem(title: "Zoom In",
+                                         action: #selector(SpiceWindowController.zoomIn(_:)), keyEquivalent: "=")
+        zoomInUnshifted.keyEquivalentModifierMask = [.control, .command]
+        zoomInUnshifted.isHidden = true
+        zoomInUnshifted.allowsKeyEquivalentWhenHidden = true
+        menu.addItem(zoomInUnshifted)
+
+        // "-" and "0" are unshifted on every layout we care about: one item each.
+        let zoomOut = NSMenuItem(title: "Zoom Out",
+                                 action: #selector(SpiceWindowController.zoomOut(_:)), keyEquivalent: "-")
+        zoomOut.keyEquivalentModifierMask = [.control, .command]
+        menu.addItem(zoomOut)
+        menu.addItem(.separator())
+
+        let automatic = NSMenuItem(title: DisplayZoom.automatic.title,
+                                   action: #selector(SpiceWindowController.setDisplayZoom(_:)), keyEquivalent: "0")
+        automatic.keyEquivalentModifierMask = [.control, .command]
+        automatic.tag = DisplayZoom.automatic.rawValue
+        automatic.toolTip = "Match the guest resolution to the window's point size — 2× on a "
+            + "Retina display, 1× on a normal-DPI monitor — following whichever screen the "
+            + "window is on."
+        menu.addItem(automatic)
+        menu.addItem(.separator())
+
+        for level in DisplayZoom.ladder {
+            let levelItem = NSMenuItem(title: level.title,
+                                       action: #selector(SpiceWindowController.setDisplayZoom(_:)), keyEquivalent: "")
+            levelItem.tag = level.rawValue
+            menu.addItem(levelItem)
+        }
+        return item
+    }
 }

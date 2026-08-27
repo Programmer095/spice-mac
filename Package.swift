@@ -62,6 +62,7 @@ let package = Package(
     dependencies: [
         .package(path: "Packages/VVConfig"),
         .package(path: "Packages/SpiceInputMap"),
+        .package(path: "Packages/DisplayScale"),
         .package(path: "ThirdParty/CocoaSpice"),
     ],
     targets: [
@@ -84,6 +85,7 @@ let package = Package(
                 "SpiceController",
                 .product(name: "VVConfig", package: "VVConfig"),
                 .product(name: "SpiceInputMap", package: "SpiceInputMap"),
+                .product(name: "DisplayScale", package: "DisplayScale"),
                 .product(name: "CocoaSpice", package: "CocoaSpice"),
                 .product(name: "CocoaSpiceRenderer", package: "CocoaSpice"),
             ],

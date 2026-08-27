@@ -24,7 +24,7 @@ Thanks for your interest! SpiceMac is a native macOS SPICE client for Proxmox VE
 toolchain (no Xcode/sysroot):
 
 ```sh
-make test     # the two dependency-free runners: vvcheck (.vv parser) + inputcheck (keymap)
+make test     # the dependency-free runners: vvcheck (.vv parser), inputcheck (keymap), scalecheck (zoom geometry)
 ```
 
 The full app needs **Xcode** + the **Metal toolchain component**
@@ -82,6 +82,6 @@ the existing ones).
 ## Pull requests
 
 - Keep PRs focused; explain the "why".
-- Run the two check runners (`vvcheck` / `inputcheck`) and, for native changes,
+- Run the check runners (`vvcheck` / `inputcheck` / `scalecheck`) and, for native changes,
   `clang -fsyntax-only` over the patched ObjC if relevant.
 - Note any security implications — see [SECURITY.md](SECURITY.md).
