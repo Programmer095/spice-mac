@@ -6,6 +6,14 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **ISO / French Magic Keyboard `<>` key now reaches the guest.** The keymap was
+  ANSI-only and omitted `kVK_ISO_Section` (`0x0A`), the key next to Left Shift on
+  ISO hardware (e.g. French AZERTY `<` / `>`). Presses produced no guest event.
+  Map it to PC set-1 `KEY_102ND` (`0x56`); `inputcheck` covers the mapping.
+  (#4)
+
 ## [0.1.7] — 2026-06-15
 
 ### Fixed
