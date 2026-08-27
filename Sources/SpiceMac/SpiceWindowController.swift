@@ -3,6 +3,7 @@ import AppKit
 import Combine
 import CocoaSpice
 import SpiceController
+import DisplayScale
 
 /// Owns one SPICE session window: hosts the `SpiceDisplayView`, reflects
 /// connection state, resizes to the guest, and exposes the Connection/USB menu
@@ -19,6 +20,30 @@ final class SpiceWindowController: NSWindowController, NSWindowDelegate, NSMenuI
     /// Called when the window closes so the app can drop its reference.
     var onClose: (() -> Void)?
 
+    /// The last guest size we asked for. Suppresses a redundant monitor-config,
+    /// which costs a real mode switch; cleared when the display/agent state
+    /// restarts.
+    private var lastRequestedGuestSize: CGSize?
+
+    /// Coalesces resolution requests: one drag across a screen boundary fires
+    /// several.
+    private var pendingResolutionRequest: DispatchWorkItem?
+
+    /// Block-based NotificationCenter observers, removed on close.
+    private var notificationObservers: [NSObjectProtocol] = []
+
+    /// Backing scale of the screen this window was last seen on. Seeded at creation
+    /// so a window that merely OPENS on a Retina screen is not mistaken for one
+    /// that MOVED onto it, which would resize a window the user had deliberately
+    /// sized.
+    private var lastKnownBackingScale: CGFloat = 0
+
+    /// The zoom THIS window is at. Per-window because each window is its own
+    /// session on its own display: a level picked in one has no business
+    /// reconfiguring another's guest. Seeded from `Preferences.displayZoom` (the
+    /// last level picked anywhere) and changed only by the menu commands below.
+    private var displayZoom: DisplayZoom = Preferences.displayZoom
+
     init(client: SpiceClient, sourceURL: URL) {
         self.client = client
         self.sourceURL = sourceURL
@@ -31,8 +56,15 @@ final class SpiceWindowController: NSWindowController, NSWindowDelegate, NSMenuI
         window.acceptsMouseMovedEvents = true
         window.title = baseTitle
         window.center()
+        lastKnownBackingScale = window.backingScaleFactor
         setupViews()
         wireClient()
+        wireNotifications()
+    }
+
+    deinit {
+        pendingResolutionRequest?.cancel()
+        for observer in notificationObservers { NotificationCenter.default.removeObserver(observer) }
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
@@ -49,6 +81,11 @@ final class SpiceWindowController: NSWindowController, NSWindowDelegate, NSMenuI
         displayView.autoresizingMask = [.width, .height]
         displayView.frame = containerView.bounds
         containerView.addSubview(displayView)
+        // One of the signals for "this window is on a different display"; they all
+        // funnel into screenChanged(), which is idempotent about the duplicates.
+        displayView.onBackingScaleChange = { [weak self] _ in
+            self?.screenChanged()
+        }
 
         statusLabel.alignment = .center
         statusLabel.maximumNumberOfLines = 0
@@ -91,13 +128,37 @@ final class SpiceWindowController: NSWindowController, NSWindowDelegate, NSMenuI
 
         client.$agentConnected
             .receive(on: RunLoop.main)
-            .sink { [weak self] connected in if connected { self?.requestResolutionForCurrentSize() } }
+            .sink { [weak self] connected in
+                guard let self else { return }
+                // A fresh agent means a fresh guest display stack, so forget what we
+                // asked the previous one for.
+                self.lastRequestedGuestSize = nil
+                if connected { self.scheduleResolutionRequest(after: 0.15) }
+            }
             .store(in: &cancellables)
+    }
+
+    private func wireNotifications() {
+        let center = NotificationCenter.default
+        // Hotplug/removal, sleep/wake, and Displays "scaled resolution" changes,
+        // which resize the window WITHOUT a live resize. Longer delay: AppKit keeps
+        // shuffling windows for a while after these.
+        notificationObservers.append(center.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil, queue: .main) { [weak self] _ in
+            self?.screenChanged(after: 0.6)
+        })
     }
 
     private func attachDisplay(_ display: CSDisplay) {
         displayView.attachDisplay(display)
-        resizeToDisplay(display.displaySize)
+        lastRequestedGuestSize = nil   // a re-attach means a fresh guest surface
+        resizeToDisplay(display.displaySize, recenter: true)
+        // The agent-connected and display-created edges race, and whichever loses
+        // has to be the one that asks. Safe against the oscillation rule:
+        // spiceDisplayCreated is a one-shot per display channel (later configs fire
+        // spiceDisplayUpdated).
+        scheduleResolutionRequest(after: 0.15)
         statusLabel.isHidden = true
         window?.makeFirstResponder(displayView)
         if client.prefersFullscreen, window?.styleMask.contains(.fullScreen) == false {
@@ -140,36 +201,142 @@ final class SpiceWindowController: NSWindowController, NSWindowDelegate, NSMenuI
 
     // MARK: - Sizing
 
-    private func resizeToDisplay(_ size: CGSize) {
-        guard size.width > 1, size.height > 1, let window,
-              window.styleMask.contains(.fullScreen) == false else { return }
-        let visible = (window.screen ?? NSScreen.main)?.visibleFrame.size ?? size
-        let scale = min(1, min(visible.width / size.width, visible.height / size.height))
-        let target = CGSize(width: floor(size.width * scale), height: floor(size.height * scale))
-        window.setContentSize(target)
-        window.center()
+    /// Backing scale of the screen this window is currently on.
+    private var currentBackingScale: CGFloat {
+        window?.backingScaleFactor ?? displayView.backingScale
     }
 
+    /// Size the window so `size` guest pixels occupy `guest × zoom / backingScale`
+    /// points, clamped to what the screen can show. `recenter` only on attach; a
+    /// later zoom change keeps the window's top-left where the user put it.
+    private func resizeToDisplay(_ size: CGSize, recenter: Bool) {
+        guard size.width > 1, size.height > 1, let window,
+              window.styleMask.contains(.fullScreen) == false else { return }
+        // Clamp against the CONTENT rect the visible frame allows, not the frame
+        // itself — the title bar takes ~28 pt off the top.
+        let allowed = (window.screen ?? NSScreen.main)
+            .map { window.contentRect(forFrameRect: $0.visibleFrame).size }
+        let target = DisplayScale.windowContentPoints(guest: size,
+                                                      zoom: displayZoom,
+                                                      backingScale: window.backingScaleFactor,
+                                                      maximum: allowed)
+        if recenter {
+            window.setContentSize(target)
+            window.center()
+        } else {
+            // setContentSize keeps the frame's bottom-left; users expect the
+            // top-left to stay put. Constrain afterwards so the title bar stays
+            // reachable.
+            let topLeft = NSPoint(x: window.frame.minX, y: window.frame.maxY)
+            window.setContentSize(target)
+            window.setFrameTopLeftPoint(topLeft)
+            window.setFrame(window.constrainFrameRect(window.frame, to: window.screen),
+                            display: true)
+        }
+    }
+
+    /// Ask the guest for `windowPoints × backingScale / zoom` — exactly `zoom` host
+    /// pixels per guest pixel once it reconfigures. `SpiceDisplayView`'s aspect-fit
+    /// then derives the same factor, so the renderer and the input router follow
+    /// for free.
     private func requestResolutionForCurrentSize() {
-        guard client.supportsDynamicResolution, let display = displayView.attachedDisplay else { return }
-        // requestResolution expects guest pixels; convert points→backing pixels so
-        // Retina displays request full resolution rather than half.
-        display.requestResolution(displayView.convertToBacking(displayView.bounds))
+        guard client.supportsDynamicResolution,
+              let display = displayView.attachedDisplay else { return }
+        let target = DisplayScale.targetGuestSize(viewPoints: displayView.bounds.size,
+                                                  backingScale: currentBackingScale,
+                                                  zoom: displayZoom)
+        guard DisplayScale.needsRequest(target: target,
+                                        current: display.displaySize,
+                                        lastRequested: lastRequestedGuestSize) else { return }
+        lastRequestedGuestSize = target
+        display.requestResolution(CGRect(origin: .zero, size: target))
+    }
+
+    /// Coalesced entry point for a resolution request.
+    ///
+    /// NB: every caller is a HOST-side geometry event or the one-shot agent edge.
+    /// Nothing guest-side may call it — a guest resolution change must only re-fit
+    /// the viewport, or the resize↔request oscillation this app already fixed comes
+    /// back.
+    private func scheduleResolutionRequest(after delay: TimeInterval = 0.3) {
+        pendingResolutionRequest?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.pendingResolutionRequest = nil
+            // Never fire mid-drag; windowDidEndLiveResize will reschedule us.
+            guard self.window?.inLiveResize != true else { return }
+            self.requestResolutionForCurrentSize()
+        }
+        pendingResolutionRequest = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
+    }
+
+    /// The user picked a new zoom.
+    ///
+    /// With a guest agent the window is the user's chosen viewport and must NOT
+    /// change: only the guest's pixel density does, so we re-request. Without one
+    /// the guest resolution is fixed, so the only way to honour the zoom is the
+    /// other side of the equation — resize the window to `guest × zoom /
+    /// backingScale` points. That cannot reopen the oscillation: a programmatic
+    /// setContentSize is not a live resize.
+    private func applyZoomChange() {
+        if client.supportsDynamicResolution {
+            scheduleResolutionRequest(after: 0.05)   // discrete user action: near-immediate
+        } else if let size = displayView.attachedDisplay?.displaySize {
+            resizeToDisplay(size, recenter: false)
+        }
+        // Disconnected: nothing to do; the level applies once a display attaches.
+    }
+
+    /// The window may now be on a different display, so re-apply the geometry: at a
+    /// fixed level the target is `points × backingScale / Z` and the move just
+    /// changed the backing scale. The zoom LEVEL is never touched — a level the
+    /// user picked is a decision. Every request goes through
+    /// `DisplayScale.needsRequest` and is coalesced, so the several events one drag
+    /// produces cost at most one guest mode switch.
+    private func screenChanged(after delay: TimeInterval = 0.3) {
+        let scale = currentBackingScale
+        let moved = lastKnownBackingScale > 0 && abs(scale - lastKnownBackingScale) > 0.001
+        lastKnownBackingScale = scale
+
+        if client.supportsDynamicResolution {
+            // Run on every screen event, not just a scale change: two 1x monitors
+            // differ in the clamp a later resize applies.
+            scheduleResolutionRequest(after: delay)
+        } else if moved, let size = displayView.attachedDisplay?.displaySize {
+            // No agent: the guest resolution is fixed, so honour the zoom on the
+            // other side of the equation. Gated on a REAL scale change, so a move
+            // between two same-scale monitors cannot snap back a window the user
+            // resized.
+            resizeToDisplay(size, recenter: false)
+        }
     }
 
     // Request a matching guest resolution only at DISCRETE moments — never on the
     // continuous windowDidResize, which (during a live drag, or when a programmatic
     // resize fires it) creates the resize↔request oscillation.
     func windowDidEndLiveResize(_ notification: Notification) {
-        requestResolutionForCurrentSize()
+        scheduleResolutionRequest()
+    }
+
+    // The three ways AppKit reports a display change, all funnelled into the same
+    // idempotent handler because one drag does not reliably produce all three.
+    // windowDidChangeScreen is kept because it is the only one that also fires for a
+    // move between two SAME-scale monitors.
+    func windowDidChangeScreen(_ notification: Notification) {
+        screenChanged()
+    }
+
+    func windowDidChangeBackingProperties(_ notification: Notification) {
+        screenChanged()
     }
 
     func windowDidEnterFullScreen(_ notification: Notification) {
-        requestResolutionForCurrentSize()
+        scheduleResolutionRequest()
     }
 
     func windowDidExitFullScreen(_ notification: Notification) {
-        requestResolutionForCurrentSize()
+        scheduleResolutionRequest()
     }
 
     // MARK: - Window lifecycle
@@ -190,6 +357,10 @@ final class SpiceWindowController: NSWindowController, NSWindowDelegate, NSMenuI
     }
 
     func windowWillClose(_ notification: Notification) {
+        pendingResolutionRequest?.cancel()
+        pendingResolutionRequest = nil
+        for observer in notificationObservers { NotificationCenter.default.removeObserver(observer) }
+        notificationObservers.removeAll()
         displayView.router.releaseAll()
         client.disconnect()
         displayView.detach()
@@ -210,13 +381,53 @@ final class SpiceWindowController: NSWindowController, NSWindowDelegate, NSMenuI
         displayView.router.releaseAll()
     }
 
+    // MARK: - Zoom menu (responder chain targets)
+    //
+    // Per-window, so these live here rather than on the app delegate. With no session
+    // open nothing answers the selector and AppKit greys the submenu out.
+
+    @objc func setDisplayZoom(_ sender: NSMenuItem) {
+        guard let level = DisplayZoom(rawValue: sender.tag) else { return }
+        apply(zoom: level)
+    }
+
+    @objc func zoomIn(_ sender: Any?) { apply(zoom: steppedZoom(by: 1)) }
+    @objc func zoomOut(_ sender: Any?) { apply(zoom: steppedZoom(by: -1)) }
+
+    /// The next rung for this window, resolved against its own screen — which is
+    /// what turns `.automatic` into a percentage to step away from.
+    private func steppedZoom(by direction: Int) -> DisplayZoom {
+        DisplayScale.step(displayZoom, by: direction, backingScale: currentBackingScale)
+    }
+
+    private func apply(zoom: DisplayZoom) {
+        displayZoom = zoom
+        // Purely the seed for the next window; it does not reach any already open.
+        Preferences.displayZoom = zoom
+        applyZoomChange()
+    }
+
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         switch menuItem.action {
         case #selector(sendCtrlAltDel(_:)), #selector(releaseCursor(_:)):
             return displayView.router.input != nil
+        case #selector(setDisplayZoom(_:)):
+            // Radio-style: exactly one level checked, recomputed on every menu open
+            // so it tracks this window, including after ⌃⌘+ / ⌃⌘-.
+            menuItem.state = (menuItem.tag == displayZoom.rawValue) ? .on : .off
+            if menuItem.tag == DisplayZoom.automatic.rawValue {
+                // Show what Automatic currently resolves to on this window's screen.
+                let percent = Int((currentBackingScale * 100).rounded())
+                menuItem.title = "\(DisplayZoom.automatic.title) (\(percent)%)"
+            }
+        case #selector(zoomIn(_:)):
+            return steppedZoom(by: 1) != displayZoom
+        case #selector(zoomOut(_:)):
+            return steppedZoom(by: -1) != displayZoom
         default:
-            return true
+            break
         }
+        return true
     }
 
     // MARK: - USB menu

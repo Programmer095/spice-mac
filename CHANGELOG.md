@@ -6,6 +6,71 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Display zoom (View ▸ Zoom).** On a Retina Mac the client asked the guest for
+  the view's full *backing pixel* count, so a 1512×982-point window drove the
+  guest at 3024×1964 — the guest has no idea the Mac is HiDPI, so it rendered
+  one pixel per pixel and everything came out half size, while the VM pushed
+  four times the pixels it needed. Zoom is now **Z = Mac physical pixels per
+  guest pixel**: the client requests `points × backing scale ÷ Z` and each guest
+  pixel is drawn as a Z×Z block, so readability and cost improve together.
+  Shortcuts **⌃⌘+ / ⌃⌘− / ⌃⌘0**.
+
+- **The zoom level is per-window, and a fixed level is absolute.** Each window
+  is its own session on its own display, so it carries its own level: picking
+  one in the front window leaves the others alone. The commands live on the
+  window controller and reach it down the responder chain the way `Connection ▸
+  Send Ctrl-Alt-Del` already did, so the submenu greys out with no session open;
+  the preference is only the seed a new window starts from. Nothing but the user
+  ever changes a level — **Automatic** is the mode for constant apparent size
+  across a move.
+
+- **A window that changes display re-applies its geometry.** At a fixed level
+  the target guest size is `points × backing scale ÷ Z`, and a move changes the
+  backing scale out from under it — which is why it used to need a manual nudge
+  of the window before the guest came out right. All four signals AppKit offers
+  now drive it, including `NSApplicationDidChangeScreenParameters` for hotplug,
+  sleep/wake and Displays scaled-mode changes, which resize the window without a
+  live resize. Requests are coalesced, so four triggers cost at most one guest
+  mode switch.
+
+- **Without `spice-vdagent`, zoom and screen changes resize the *window***
+  (`guest × Z ÷ backing scale` points) rather than doing nothing — the guest
+  resolution is fixed, so that is the only side of the equation left. The
+  geometry is a new dependency-free package, `Packages/DisplayScale`, with a
+  21-check `scalecheck` runner wired into `make test` and CI.
+
+### Changed
+
+- **The default zoom is Automatic (Z = the screen's backing scale), which
+  changes behaviour on upgrade.** The guest resolution now tracks the window's
+  *point* size instead of its backing-pixel size, so on first connect after
+  updating a Retina guest drops to roughly half its previous resolution and
+  everything in it gets twice as big. That is the fix; **View ▸ Zoom ▸ 100%**
+  restores the old behaviour. Automatic also means the requested resolution is
+  the window's point size on *any* display, so dragging between screens needs no
+  guest reconfiguration.
+
+### Fixed
+
+- **Guest text was blurry at some window sizes and not others**, worst on a
+  normal-DPI monitor. The sampler only went nearest-neighbour at 2× or more, so
+  a 1:1 presentation — what 100% means on a 1x screen — always took the bilinear
+  path; and because the requested mode is floored onto the 8-wide/2-high grid
+  guest drivers want, the centred quad landed on a **half-pixel** offset
+  whenever that slack was odd. Nearest now applies at any whole-number
+  magnification, and `viewportOrigin` nudges the quad onto whole pixels — the
+  input router subtracts the same origin, so the cursor stays locked.
+
+- **Dragging a window between a Retina panel and a 1x monitor did not re-scale
+  the guest.** `MTKView` refreshes `drawableSize` lazily, so inside
+  `viewDidChangeBackingProperties` — the one moment such a move offers — it
+  still holds the *previous* screen's value: on a real 2.0↔1.0 drag the callback
+  reports `backingScaleFactor` 1.0 while `drawableSize` is still 1800×1200 for a
+  view that is now 900×600 physical pixels. The fit now measures with
+  `convertToBacking(bounds)`, which follows the backing store immediately, and
+  pulls the drawable up to match.
 ## [0.1.7] — 2026-06-15
 
 ### Fixed

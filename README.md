@@ -14,7 +14,8 @@ UTM uses). Apple-Silicon only.
 > resize; keyboard including ⌘/modifiers; mouse with the guest cursor aligned to
 > the macOS pointer; bidirectional clipboard; and audio (needs a SPICE audio
 > device on the VM). USB redirection is plumbed via the Connection menu. The `.vv`
-> parser and keyboard map are also unit-tested (28 dependency-free checks).
+> parser, keyboard map, and zoom geometry are also unit-tested (58 dependency-free
+> checks).
 >
 > | Feature | Status |
 > |---|---|
@@ -91,6 +92,7 @@ Native SPICE frameworks (arm64)   Frameworks/  (staged by scripts/fetch-sysroot.
 Pure-Swift, independently testable:
   VVConfig        Packages/VVConfig       — virt-viewer .vv parser (+ Proxmox)
   SpiceInputMap   Packages/SpiceInputMap  — macOS keycode → PC set-1 scancode
+  DisplayScale    Packages/DisplayScale   — zoom / viewport geometry (guest px ↔ points)
 ```
 
 The decisive design point: **CocoaSpice must be forked.** `CSConnection` keeps the
@@ -180,8 +182,9 @@ CA.
 The pure-Swift libraries build and test with just the Swift toolchain (no Xcode):
 
 ```sh
-( cd Packages/VVConfig     && swift run vvcheck )     # .vv parser: 15 checks
+( cd Packages/VVConfig      && swift run vvcheck )     # .vv parser: 24 checks
 ( cd Packages/SpiceInputMap && swift run inputcheck )  # scancode map: 13 checks
+( cd Packages/DisplayScale  && swift run scalecheck )  # zoom geometry: 21 checks
 ```
 
 The CocoaSpice fork patch was syntax-checked against the real vendored
@@ -194,7 +197,9 @@ glib/spice headers (`clang -fsyntax-only`, exit 0).
   *must* go through `proxy=…:3128`. Re-download for every (re)connect.
 - **Inverted TLS verification.** Trust the self-signed PVE cluster CA and match
   `cert-subject`; normal hostname/pubkey checks fail by design.
-- **Guest agent required** for clipboard + dynamic resolution.
+- **Guest agent required** for clipboard + dynamic resolution — including **View ▸
+  Zoom**, which works by asking the guest for a different resolution. Without
+  `spice-vdagent` the guest resolution is fixed, so zoom resizes the *window* instead.
 - **Audio needs a SPICE audio device on the VM** — most Proxmox VMs ship without
   one, so there's no playback channel. Add **Hardware ▸ Audio Device** (e.g.
   `ich9-intel-hda`, backend **SPICE**) and reboot the guest.
@@ -204,6 +209,40 @@ glib/spice headers (`clang -fsyntax-only`, exit 0).
   (the latest upstream release)**, but **glib/gstreamer** are still the older UTM build
   (lower-priority; acceptable for personal use but carry their own CVEs). (A raw UTM
   sysroot still has OpenSSL 1.1.1b — run `upgrade-openssl.sh`.)
+
+## Display zoom (Retina)
+
+**View ▸ Zoom** sets how many Mac physical pixels each guest pixel occupies.
+
+SpiceMac asks the guest agent for a resolution of `window points × backing scale ÷
+zoom`. At **200%** on a Retina Mac the guest renders a quarter of the pixels and each
+one is drawn as a crisp 2×2 block (nearest-neighbour kicks in automatically at
+whole-number zoom) — readable guest UI *and* markedly less work for the VM, the host,
+and the wire.
+
+The default is **Automatic**, i.e. zoom = the screen's backing scale, so the guest
+resolution simply tracks the window's *point* size: 2× on the built-in Retina display,
+1× on a normal-DPI external monitor, adjusting itself when you drag the window between
+them. Pick **100%** for the old behaviour (guest resolution = full backing pixels;
+correct, but tiny on Retina).
+
+**The level is per window.** Each window is its own session on its own display, so
+setting a level in one leaves the others alone, and the Zoom menu always shows the front
+window's level. A newly opened window starts at whatever level you last picked.
+
+**A fixed level is absolute** — Z host pixels per guest pixel wherever the window is —
+and nothing but you ever changes it. Drag a 100% window onto the Retina panel and it
+stays at 100%; the guest reconfigures and its UI gets smaller, because that is what 100%
+means there. If you want the apparent size to stay constant across a move, that is what
+**Automatic** is for.
+
+Shortcuts are ⌃⌘+ / ⌃⌘− / ⌃⌘0 (zoom in / out / Automatic) rather than plain ⌘±, so
+⌘+ and ⌘− keep reaching the guest as Super-plus / Super-minus.
+
+Guest text is pixel-exact at any whole-number zoom, 1:1 included. The one case that stays
+soft is a guest that refuses the requested mode and picks a *larger* one from its own mode
+table: the picture then has to be downscaled to fit the window, and downscaling has to
+stay bilinear or it aliases badly.
 
 ## USB redirection
 

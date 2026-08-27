@@ -58,6 +58,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         sender.state = Preferences.trashConnectionFileAfterUse ? .on : .off
     }
 
+    // View ▸ Zoom is per-window and lives on SpiceWindowController, reached down the
+    // responder chain — see the Zoom menu section there.
+
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         switch menuItem.action {
         case #selector(toggleHideMacCursor(_:)):
