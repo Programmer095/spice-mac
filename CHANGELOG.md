@@ -54,6 +54,16 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A dead connection no longer hides its own explanation.** When a session
+  ended, the last guest frame stayed frozen over the window (the Metal view is
+  opaque and `detach()` leaves it showing its final texture), so the
+  "Disconnected — open a fresh .vv file" hint or the failure reason was drawn
+  invisibly behind it and the window just looked hung. The display view now
+  hides when the session ends and returns on the next connect, revealing the
+  centered status message. A specific failure reason (`.failed`) is also kept
+  if the generic disconnect callback arrives after the error one, instead of
+  being downgraded to "Disconnected."
+
 - **ISO / French Magic Keyboard `<>` key now reaches the guest.** The keymap was
   ANSI-only and omitted `kVK_ISO_Section` (`0x0A`), the key next to Left Shift on
   ISO hardware (e.g. French AZERTY `<` / `>`). Presses produced no guest event.

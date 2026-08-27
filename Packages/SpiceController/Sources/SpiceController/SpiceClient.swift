@@ -159,7 +159,12 @@ extension SpiceClient: CSConnectionDelegate {
     public func spiceDisconnected(_ connection: CSConnection) {
         onMain {
             self.pasteboard.stopMonitoring()
-            self.status = .disconnected
+            // An error drop fires spiceError(...) (status = .failed(reason)) and
+            // THEN this. Keep the specific reason instead of downgrading it to the
+            // generic "disconnected" message.
+            if case .failed = self.status {} else {
+                self.status = .disconnected
+            }
             self.agentConnected = false
             self.supportsDynamicResolution = false
             self.primaryInput = nil

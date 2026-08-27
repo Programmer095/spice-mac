@@ -169,17 +169,26 @@ final class SpiceWindowController: NSWindowController, NSWindowDelegate, NSMenuI
     private func update(for status: SpiceClient.Status) {
         switch status {
         case .idle:
+            displayView.isHidden = false
             statusLabel.stringValue = ""
         case .connecting:
+            displayView.isHidden = false
             showStatus("Connecting…")
         case .connected:
+            displayView.isHidden = false
             statusLabel.isHidden = true
             client.usbManager?.delegate = self
             refreshUSBMenu()
         case .disconnected:
             // The SPICE ticket is single-use, so reconnecting needs a fresh file.
+            // Hide the (now static) display: detach() leaves the last guest frame
+            // frozen on the opaque MTKView, so without this the stale screen stays
+            // up and the message below is lost behind it. Hiding reveals the window
+            // background so the centered message is readable.
+            displayView.isHidden = true
             showStatus("Disconnected.\nOpen a fresh .vv file to reconnect.")
         case .failed(let message):
+            displayView.isHidden = true
             showStatus("Connection failed.\n\(message)")
         }
         window?.title = title(for: status)
