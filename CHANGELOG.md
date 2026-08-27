@@ -6,14 +6,6 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Fixed
-
-- **ISO / French Magic Keyboard `<>` key now reaches the guest.** The keymap was
-  ANSI-only and omitted `kVK_ISO_Section` (`0x0A`), the key next to Left Shift on
-  ISO hardware (e.g. French AZERTY `<` / `>`). Presses produced no guest event.
-  Map it to PC set-1 `KEY_102ND` (`0x56`); `inputcheck` covers the mapping.
-  (#4)
-
 ### Added
 
 - **Display zoom (View ▸ Zoom).** On a Retina Mac the client asked the guest for
@@ -61,6 +53,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   guest reconfiguration.
 
 ### Fixed
+
+- **ISO / French Magic Keyboard `<>` key now reaches the guest.** The keymap was
+  ANSI-only and omitted `kVK_ISO_Section` (`0x0A`), the key next to Left Shift on
+  ISO hardware (e.g. French AZERTY `<` / `>`). Presses produced no guest event.
+  Map it to PC set-1 `KEY_102ND` (`0x56`); `inputcheck` covers the mapping.
+  (#4)
 
 - **Guest text was blurry at some window sizes and not others**, worst on a
   normal-DPI monitor. The sampler only went nearest-neighbour at 2× or more, so

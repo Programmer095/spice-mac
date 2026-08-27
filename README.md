@@ -14,7 +14,7 @@ UTM uses). Apple-Silicon only.
 > resize; keyboard including ⌘/modifiers; mouse with the guest cursor aligned to
 > the macOS pointer; bidirectional clipboard; and audio (needs a SPICE audio
 > device on the VM). USB redirection is plumbed via the Connection menu. The `.vv`
-> parser, keyboard map, and zoom geometry are also unit-tested (58 dependency-free
+> parser, keyboard map, and zoom geometry are also unit-tested (59 dependency-free
 > checks).
 >
 > | Feature | Status |
@@ -183,7 +183,7 @@ The pure-Swift libraries build and test with just the Swift toolchain (no Xcode)
 
 ```sh
 ( cd Packages/VVConfig      && swift run vvcheck )     # .vv parser: 24 checks
-( cd Packages/SpiceInputMap && swift run inputcheck )  # scancode map: 13 checks
+( cd Packages/SpiceInputMap && swift run inputcheck )  # scancode map: 14 checks
 ( cd Packages/DisplayScale  && swift run scalecheck )  # zoom geometry: 21 checks
 ```
 
