@@ -404,4 +404,77 @@ t.test("an incomplete legacy profile is dropped rather than carried forward brok
     t.expectEqual(PVEServerProfile.migratingLegacy(partial).count, 0)
 }
 
+// MARK: - Fleet reducer
+
+func fleetFixture() -> (PVEFleetState, UUID, UUID) {
+    var home = PVEServerProfile(label: "Home", host: "10.0.0.1")
+    home.tokenID = "root@pam!spicemac"
+    var siteB = PVEServerProfile(label: "Site B", host: "10.0.0.2")
+    siteB.tokenID = "root@pam!spicemac"
+    let state = PVEFleetState.reduce(PVEFleetState(), .profilesChanged([home, siteB]))
+    return (state, home.id, siteB.id)
+}
+
+let vm = PVEGuest(vmid: 101, name: "win11", node: "pve1", status: "running", kind: .qemu)
+
+t.test("profiles seed one signed-out instance each") {
+    let (state, _, _) = fleetFixture()
+    t.expectEqual(state.instances.count, 2)
+    t.expectEqual(state.instances.allSatisfy { $0.state == .signedOut }, true)
+}
+
+t.test("sign-in moves only its own instance") {
+    let (seeded, home, siteB) = fleetFixture()
+    let state = PVEFleetState.reduce(seeded, .signInStarted(home))
+    t.expectEqual(state.instance(home)?.state, .signingIn)
+    t.expectEqual(state.instance(siteB)?.state, .signedOut)
+}
+
+t.test("loaded guests land on the right instance") {
+    let (seeded, home, _) = fleetFixture()
+    let state = PVEFleetState.reduce(PVEFleetState.reduce(seeded, .signInStarted(home)),
+                                     .guestsLoaded(home, [vm]))
+    t.expectEqual(state.instance(home)?.state, .signedIn([vm]))
+}
+
+t.test("one instance failing leaves the others untouched") {
+    let (seeded, home, siteB) = fleetFixture()
+    var state = PVEFleetState.reduce(seeded, .guestsLoaded(home, [vm]))
+    state = PVEFleetState.reduce(state, .signInFailed(siteB, .unauthorized))
+    t.expectEqual(state.instance(home)?.state, .signedIn([vm]))
+    t.expectEqual(state.instance(siteB)?.state, .failed(.unauthorized))
+}
+
+t.test("signing out clears that instance's guests") {
+    let (seeded, home, _) = fleetFixture()
+    var state = PVEFleetState.reduce(seeded, .guestsLoaded(home, [vm]))
+    state = PVEFleetState.reduce(state, .signedOut(home))
+    t.expectEqual(state.instance(home)?.state, .signedOut)
+}
+
+t.test("an event for an unknown instance is ignored, not a crash") {
+    let (seeded, _, _) = fleetFixture()
+    let state = PVEFleetState.reduce(seeded, .guestsLoaded(UUID(), [vm]))
+    t.expectEqual(state.instances.count, 2)
+    t.expectEqual(state.instances.allSatisfy { $0.state == .signedOut }, true)
+}
+
+t.test("removing a profile drops its instance and keeps the rest signed in") {
+    let (seeded, home, siteB) = fleetFixture()
+    let signedIn = PVEFleetState.reduce(seeded, .guestsLoaded(home, [vm]))
+    let remaining = try t.unwrap(signedIn.instance(home)?.profile)
+    let state = PVEFleetState.reduce(signedIn, .profilesChanged([remaining]))
+    t.expectEqual(state.instances.count, 1)
+    t.expectEqual(state.instance(home)?.state, .signedIn([vm]))
+    t.expectNil(state.instance(siteB))
+}
+
+t.test("every guest across the fleet is reachable in one list") {
+    let (seeded, home, siteB) = fleetFixture()
+    var state = PVEFleetState.reduce(seeded, .guestsLoaded(home, [vm]))
+    let other = PVEGuest(vmid: 200, name: "docker", node: "pve2", status: "running", kind: .lxc)
+    state = PVEFleetState.reduce(state, .guestsLoaded(siteB, [other]))
+    t.expectEqual(state.allGuests.count, 2)
+}
+
 t.finishAndExit()
