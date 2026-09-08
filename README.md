@@ -13,9 +13,9 @@ UTM uses). Apple-Silicon only.
 > sysroot). Verified end-to-end: Metal display with aspect-fit scaling and live
 > resize; keyboard including ⌘/modifiers; mouse with the guest cursor aligned to
 > the macOS pointer; bidirectional clipboard; and audio (needs a SPICE audio
-> device on the VM). USB redirection is plumbed via the Connection menu. The `.vv`
-> parser, keyboard map, and zoom geometry are also unit-tested (59 dependency-free
-> checks).
+> device on the VM). USB redirection is plumbed via the Connection menu. The
+> Proxmox API binding and fleet model, `.vv` parser, keyboard map, and zoom
+> geometry are also unit-tested (143 dependency-free checks).
 >
 > | Feature | Status |
 > |---|---|
@@ -25,6 +25,7 @@ UTM uses). Apple-Silicon only.
 > | Clipboard (Mac↔VM, both directions) | ✅ |
 > | Audio (guest needs a SPICE audio device) | ✅ |
 > | USB redirection | plumbed |
+> | Several Proxmox servers signed in at once, one guest tree | ✅ |
 
 ## Download
 
@@ -164,11 +165,11 @@ the matching build-time headers; keep the sysroot version in sync with them.
 
 ### Sign in and pick a VM (recommended)
 
-SpiceMac opens here. **File ▸ Connect to Proxmox…** (⌘N) signs in to a node and
-lists its guests, so there is no `.vv` download step at all. With a saved server it
-signs in on launch and goes straight to the VM list; without one it shows the
-sign-in form. Select a VM and click **Open Console**
-(or double-click it); SpiceMac requests a fresh ticket at that moment.
+SpiceMac opens here. **File ▸ Connect to Proxmox…** (⌘N) signs in and lists guests,
+so there is no `.vv` download step at all. With a saved server it signs in on
+launch and goes straight to the VM list; without one it shows the sign-in form.
+Select a VM and click **Open Console** (or double-click it); SpiceMac requests a
+fresh ticket at that moment.
 
 1. In the Proxmox web UI create an API token under **Datacenter ▸ Permissions ▸
    API Tokens** and give it **`VM.Console`** on the VMs you want to reach. Prefer
@@ -184,6 +185,31 @@ sign-in form. Select a VM and click **Open Console**
 
 Because the app can mint tickets, a dropped session offers a **Reconnect** button
 rather than sending you back to the web UI.
+
+### Several servers at once
+
+**File ▸ Manage Servers…** configures as many Proxmox servers as you like — home
+lab, a client's cluster, a rack somewhere else — each with its own nickname,
+credentials and Keychain item. Every guest across all of them appears in one
+searchable tree, grouped under the server it belongs to, so there is no
+disconnect-and-sign-in-elsewhere step.
+
+- Sign-in runs **concurrently and independently** per server. One site being down
+  reports on that server's own row and leaves the rest of the fleet working.
+- Anything that has to **block on you** — the certificate dialog, Keychain access,
+  being asked for a secret — is serialised through a single queue, so a fleet of
+  ten cannot stack ten dialogs at launch.
+- Right-click a server row for **Sign In**, **Sign Out** and **Refresh**; the
+  search field filters servers and guests together.
+- Renaming a server's host or token **moves its Keychain item with it**; removing
+  a server deletes its secret and forgets its pinned certificate. **Cancel** in the
+  sheet touches neither.
+- With **Remember in Keychain** off, SpiceMac asks for that server's secret at each
+  sign-in rather than refusing to connect.
+
+Upgrading from a single saved server needs no work: it is migrated into a fleet of
+one on first launch, keeping its Keychain account and its certificate pin, so
+nothing is re-entered or re-approved.
 
 ### Moving files
 
@@ -288,7 +314,7 @@ The pure-Swift libraries build and test with just the Swift toolchain (no Xcode)
 
 ```sh
 ( cd Packages/VVConfig      && swift run vvcheck )     # .vv parser: 24 checks
-( cd Packages/PVEClient     && swift run pvecheck )    # Proxmox API wire format: 41 checks
+( cd Packages/PVEClient     && swift run pvecheck )    # Proxmox API + fleet model: 84 checks
 ( cd Packages/SpiceInputMap && swift run inputcheck )  # scancode map: 14 checks
 ( cd Packages/DisplayScale  && swift run scalecheck )  # zoom geometry: 21 checks
 ```
