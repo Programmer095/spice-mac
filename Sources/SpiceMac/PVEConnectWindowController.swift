@@ -3,11 +3,67 @@ import AppKit
 import OSLog
 import PVEClient
 
-/// The Proxmox browser: sign in to a node, then pick a guest and open its console.
+/// A stable identity for an outline row wrapping a value type. `PVEInstanceSnapshot`
+/// and `PVEGuest` are structs, so handing them straight to `NSOutlineViewDataSource`
+/// loses the object identity that `reloadItem`/expansion tracking rely on: a snapshot
+/// whose state just changed is a different value than the one the outline view last
+/// saw, so it stops being recognised as "the same row" and its disclosure state is
+/// lost. Reusing one wrapper object per instance across state updates (mutating its
+/// `snapshot` in place instead of replacing the object) keeps that identity stable.
+private final class PVEFleetInstanceRow: NSObject {
+    let id: UUID
+    var snapshot: PVEInstanceSnapshot
+
+    init(snapshot: PVEInstanceSnapshot) {
+        self.id = snapshot.id
+        self.snapshot = snapshot
+    }
+
+    override func isEqual(_ object: Any?) -> Bool {
+        (object as? PVEFleetInstanceRow)?.id == id
+    }
+
+    override var hash: Int { id.hashValue }
+}
+
+/// Keyed by instance id *and* guest id: two different clusters can easily share node
+/// names and VMIDs, and `PVEGuest.id` alone does not disambiguate them.
+private final class PVEFleetGuestRow: NSObject {
+    let instanceID: UUID
+    var guest: PVEGuest
+
+    init(instanceID: UUID, guest: PVEGuest) {
+        self.instanceID = instanceID
+        self.guest = guest
+    }
+
+    override func isEqual(_ object: Any?) -> Bool {
+        guard let other = object as? PVEFleetGuestRow else { return false }
+        return other.instanceID == instanceID && other.guest.id == guest.id
+    }
+
+    override var hash: Int {
+        var hasher = Hasher()
+        hasher.combine(instanceID)
+        hasher.combine(guest.id)
+        return hasher.finalize()
+    }
+}
+
+private extension PVEInstanceState {
+    var isSignedIn: Bool { if case .signedIn = self { return true }; return false }
+    var isFailed: Bool { if case .failed = self { return true }; return false }
+}
+
+/// The Proxmox browser: sign in to one or more nodes, then pick a guest and open its
+/// console.
 ///
-/// One window, two halves — credentials on top, the guest list below. The list stays
-/// live after connecting so several consoles can be opened without signing in again.
-final class PVEConnectWindowController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate, NSMenuDelegate, NSWindowDelegate {
+/// One window: credentials for the primary server on top, the whole fleet's guests
+/// below as a tree — every configured server as a parent row, its guests nested
+/// beneath. The tree stays live after connecting so several consoles can be opened
+/// without signing in again, and a server that fails or comes back down reports that
+/// on its own row rather than as a modal over the whole app.
+final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSource, NSOutlineViewDelegate, NSSearchFieldDelegate, NSMenuDelegate, NSWindowDelegate {
 
     /// Called with a guest and the authenticated client that can mint tickets for it.
     var onOpenConsole: ((PVEGuest, PVEClient) -> Void)?
@@ -36,7 +92,7 @@ final class PVEConnectWindowController: NSWindowController, NSTableViewDataSourc
     private let openButton = NSButton(title: "Open Console", target: nil, action: nil)
     private let powerButton = NSPopUpButton(frame: .zero, pullsDown: true)
     private let contextMenu = NSMenu()
-    private let tableView = NSTableView()
+    private let outlineView = NSOutlineView()
 
     private var formGrid: NSGridView!
     private var tokenRows: [NSGridRow] = []
@@ -46,15 +102,33 @@ final class PVEConnectWindowController: NSWindowController, NSTableViewDataSourc
 
     private static let log = Logger(subsystem: "org.spicemac.SpiceMac", category: "proxmox")
 
-    private var client: PVEClient?
     /// The secret as loaded from the Keychain. Rewriting an unchanged secret costs a
     /// second authorization prompt for no benefit, so persist only real changes.
     private var loadedSecret: String?
-    private var guests: [PVEGuest] = []
-    private var visibleGuests: [PVEGuest] = []
+    /// The profile the credentials form above edits — always the fleet's first slot.
+    /// Everything else in the window (the tree, sign-in-all-on-reveal) is driven by
+    /// the coordinator across every configured server, not just this one.
+    private var primaryProfileID: UUID?
 
-    /// Drives sign-in across the whole fleet. This window still only shows the first
-    /// configured server; the tree that surfaces the rest is a later step.
+    /// Row wrappers, reused across reloads by id so `NSOutlineView` keeps expansion
+    /// and selection state stable even though the coordinator hands us fresh struct
+    /// values on every change. Pruned in `refreshTree()` to drop servers/guests that
+    /// no longer exist.
+    private var instanceRowCache: [UUID: PVEFleetInstanceRow] = [:]
+    private var guestRowCache: [String: PVEFleetGuestRow] = [:]
+    private var visibleInstanceRows: [PVEFleetInstanceRow] = []
+    private var visibleGuestRowsByInstance: [UUID: [PVEFleetGuestRow]] = [:]
+    /// Instances seen in a previous `refreshTree()` — a newly-appeared one is
+    /// auto-expanded once so a freshly signed-in server doesn't look collapsed shut.
+    private var knownInstanceIDs: Set<UUID> = []
+
+    /// The empty-guest-list diagnosis, per instance. Rendered as that row's subtitle
+    /// instead of an alert — see `diagnoseIfEmpty`.
+    private var emptyListHints: [UUID: String] = [:]
+    private var diagnosedInstances: Set<UUID> = []
+
+    /// Drives sign-in across the whole fleet: one client per configured server,
+    /// folded into a tree instead of this window showing only the first one.
     private let coordinator: PVEFleetCoordinator
 
     // MARK: - Lifecycle
@@ -81,38 +155,34 @@ final class PVEConnectWindowController: NSWindowController, NSTableViewDataSourc
         window.delegate = self
         buildUI()
         loadProfile()
+        coordinator.onChange = { [weak self] state in self?.handleFleetStateChanged(state) }
+        // Populate the fleet from whatever is already on disk — Manage Servers only
+        // reports changes when the user saves there, so without this the tree stays
+        // empty until that sheet is opened once.
+        coordinator.setProfiles(PVEProfileStore.shared.profiles)
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
-    /// Forwarded from the Manage Servers sheet. This window still only drives the
-    /// first configured server directly; the fleet as a whole is the coordinator's
-    /// concern until the tree view replaces this single-server display.
+    /// Forwarded from the Manage Servers sheet.
     func setProfiles(_ profiles: [PVEServerProfile]) {
         coordinator.setProfiles(profiles)
+        primaryProfileID = profiles.first?.id
     }
 
-    /// Show the window; if a complete profile and a stored secret are already on hand,
-    /// sign in straight away so the common case is "open app, see your VMs".
+    /// Show the window, then bring the tree up to date: refresh the instance behind
+    /// whatever is selected, or sign in everywhere if nothing is signed in yet. No
+    /// timer — this is the one point a reveal costs a request.
     func present(autoConnect: Bool = true) {
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         guard autoConnect else { return }
-        guard client == nil else {
-            Self.log.info("auto sign-in skipped: already signed in")
-            return
+        if let id = currentSelectionInstanceID() {
+            coordinator.refresh(id)
+        } else if coordinator.state.instances.contains(where: { $0.state.isSignedIn }) == false {
+            coordinator.signInAll()
         }
-        guard let profile = PVEProfileStore.shared.profiles.first, profile.isComplete else {
-            Self.log.info("auto sign-in skipped: no complete saved profile")
-            return
-        }
-        guard currentSecret().isEmpty == false else {
-            Self.log.info("auto sign-in skipped: no secret available (keychain read returned nothing)")
-            return
-        }
-        Self.log.info("auto sign-in starting for \(profile.host, privacy: .public)")
-        connect(self)
     }
 
     // MARK: - Building
@@ -207,9 +277,9 @@ final class PVEConnectWindowController: NSWindowController, NSTableViewDataSourc
         listHeader.orientation = .horizontal
         listHeader.spacing = 8
 
-        configureTable()
+        configureOutline()
         let scrollView = NSScrollView()
-        scrollView.documentView = tableView
+        scrollView.documentView = outlineView
         scrollView.hasVerticalScroller = true
         scrollView.borderType = .bezelBorder
         scrollView.autohidesScrollers = true
@@ -222,12 +292,12 @@ final class PVEConnectWindowController: NSWindowController, NSTableViewDataSourc
         powerButton.bezelStyle = .rounded
         powerButton.isEnabled = false
         contextMenu.delegate = self
-        tableView.menu = contextMenu
+        outlineView.menu = contextMenu
 
         let footer = NSStackView(views: [powerButton, NSView(), openButton])
         footer.orientation = .horizontal
 
-        // Everything except the table hugs its content, so spare vertical space goes to
+        // Everything except the tree hugs its content, so spare vertical space goes to
         // the guest list. Without this the stack hands slack to the form, and hiding the
         // credentials rows on sign-in leaves a gap where they used to be.
         // NB: .defaultHigh, never .required. Required hugging is a hard constraint that
@@ -292,7 +362,7 @@ final class PVEConnectWindowController: NSWindowController, NSTableViewDataSourc
         authKindChanged()
     }
 
-    private func configureTable() {
+    private func configureOutline() {
         let columns: [(String, String, CGFloat)] = [
             ("name", "Name", 220),
             ("vmid", "ID", 60),
@@ -303,27 +373,28 @@ final class PVEConnectWindowController: NSWindowController, NSTableViewDataSourc
             let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(identifier))
             column.title = title
             column.width = width
-            tableView.addTableColumn(column)
+            outlineView.addTableColumn(column)
         }
+        outlineView.outlineTableColumn = outlineView.tableColumns.first
         // Only the name column should grow; ID/Node/Status are narrow facts and were
         // being pushed off the right edge when the name column absorbed the width.
-        tableView.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
-        if let name = tableView.tableColumns.first {
+        outlineView.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
+        if let name = outlineView.tableColumns.first {
             name.resizingMask = [.autoresizingMask, .userResizingMask]
-            name.minWidth = 120
+            name.minWidth = 160
         }
-        for column in tableView.tableColumns.dropFirst() {
+        for column in outlineView.tableColumns.dropFirst() {
             column.resizingMask = [.userResizingMask]
             column.minWidth = 50
         }
-        tableView.dataSource = self
-        tableView.delegate = self
-        tableView.usesAlternatingRowBackgroundColors = true
-        tableView.allowsMultipleSelection = false
-        tableView.rowHeight = 22
-        tableView.target = self
-        tableView.doubleAction = #selector(openSelectedConsole(_:))
-        if #available(macOS 11.0, *) { tableView.style = .inset }
+        outlineView.dataSource = self
+        outlineView.delegate = self
+        outlineView.usesAlternatingRowBackgroundColors = true
+        outlineView.allowsMultipleSelection = false
+        outlineView.rowHeight = 22
+        outlineView.style = .sourceList
+        outlineView.target = self
+        outlineView.doubleAction = #selector(outlineDoubleClicked(_:))
     }
 
     private func onlyDigitsFormatter() -> NumberFormatter {
@@ -339,6 +410,7 @@ final class PVEConnectWindowController: NSWindowController, NSTableViewDataSourc
 
     private func loadProfile() {
         let profile = PVEProfileStore.shared.profiles.first ?? PVEServerProfile()
+        primaryProfileID = PVEProfileStore.shared.profiles.first?.id
         hostField.stringValue = profile.host
         portField.stringValue = String(profile.port)
         tokenIDField.stringValue = profile.tokenID
@@ -360,7 +432,7 @@ final class PVEConnectWindowController: NSWindowController, NSTableViewDataSourc
     }
 
     /// Starts from the stored first profile (if any) so its `id` and `label` survive
-    /// a save — this window only edits that one slot, it must not fork a new identity
+    /// a save — this form only edits that one slot, it must not fork a new identity
     /// for it on every Sign In.
     private func currentProfile() -> PVEServerProfile {
         var profile = PVEProfileStore.shared.profiles.first ?? PVEServerProfile()
@@ -386,7 +458,7 @@ final class PVEConnectWindowController: NSWindowController, NSTableViewDataSourc
     }
 
     /// Once signed in the credentials are just clutter above the thing the user came
-    /// for, so fold them away and give the space to the guest list.
+    /// for, so fold them away and give the space to the guest tree.
     private func setSignedIn(_ signedIn: Bool) {
         isSignedIn = signedIn
         if signedIn {
@@ -401,13 +473,32 @@ final class PVEConnectWindowController: NSWindowController, NSTableViewDataSourc
         }
     }
 
-    @objc private func signOut() {
-        client = nil
-        guests = []
-        applyFilter()
-        refreshButton.isEnabled = false
-        setSignedIn(false)
-        showStatus("", isError: false)
+    /// Reflects the primary profile's fleet state onto the credentials form. A
+    /// sign-in failure shows on the form (this is the one server the user is looking
+    /// straight at) — every other server's failure shows on its own tree row instead.
+    private func updatePrimaryFormState() {
+        guard let id = primaryProfileID, let instance = coordinator.state.instance(id) else {
+            setBusy(false, message: nil)
+            setSignedIn(false)
+            return
+        }
+        switch instance.state {
+        case .signedOut:
+            setBusy(false, message: nil)
+            setSignedIn(false)
+            showStatus("", isError: false)
+        case .signingIn:
+            setBusy(true, message: "Signing in to \(instance.profile.host)…")
+        case .signedIn:
+            setBusy(false, message: nil)
+            setSignedIn(true)
+            showStatus("Signed in to \(instance.profile.host) as \(instance.profile.credentials(secret: "").displayUser).",
+                       isError: false)
+        case .failed(let error):
+            setBusy(false, message: nil)
+            setSignedIn(false)
+            showStatus("Sign-in failed: \(error.description)", isError: true)
+        }
     }
 
     // MARK: - Actions
@@ -418,7 +509,7 @@ final class PVEConnectWindowController: NSWindowController, NSTableViewDataSourc
 
     @objc private func connect(_ sender: Any?) {
         if isSignedIn {
-            signOut()
+            if let id = primaryProfileID { coordinator.signOut(id) }
             return
         }
         let profile = currentProfile()
@@ -436,68 +527,10 @@ final class PVEConnectWindowController: NSWindowController, NSTableViewDataSourc
             return
         }
 
-        setBusy(true, message: "Signing in to \(profile.host)…")
-        let newClient = PVEClient(server: profile.server,
-                                  credentials: profile.credentials(secret: secret),
-                                  trustDelegate: PVEProfileStore.shared)
-
-        Task { @MainActor [weak self] in
-            do {
-                let fetched = try await newClient.listGuests()
-                guard let self else { return }
-                self.client = newClient
-                self.guests = fetched
-                self.applyFilter()
-                self.setSignedIn(true)
-                self.setBusy(false, message: fetched.isEmpty
-                             ? "Signed in — no virtual machines visible."
-                             : "Signed in to \(profile.host) as \(profile.credentials(secret: "").displayUser).")
-                if fetched.isEmpty { self.explainEmptyList(client: newClient, profile: profile) }
-                self.refreshButton.isEnabled = true
-                self.persist(profile: profile, secret: secret)
-                if fetched.isEmpty == false, self.tableView.selectedRow < 0 {
-                    self.tableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
-                }
-            } catch {
-                guard let self else { return }
-                self.setBusy(false, message: nil)
-                Self.log.error("sign-in failed for \(profile.host, privacy: .public): \(String(describing: error), privacy: .public)")
-                self.showStatus("Sign-in failed.", isError: true)
-                self.presentError(error, title: "Could not sign in to \(profile.host)")
-            }
-        }
-    }
-
-    /// An empty guest list is ambiguous: Proxmox filters the cluster listing by
-    /// permission and returns an empty array rather than a 403, so a token with no ACL
-    /// looks exactly like a cluster with no VMs. Ask what the token can actually see.
-    private func explainEmptyList(client: PVEClient, profile: PVEServerProfile) {
-        Task { @MainActor [weak self] in
-            guard let self, let hint = await client.diagnoseEmptyGuestList() else { return }
-            self.showStatus("No guests visible — check the token's permissions.", isError: true)
-
-            let alert = NSAlert()
-            alert.alertStyle = .warning
-            alert.messageText = "No virtual machines are visible to these credentials"
-            let token = profile.authKind == .apiToken ? profile.tokenID : profile.credentials(secret: "").displayUser
-            alert.informativeText = """
-                \(hint)
-
-                On the Proxmox node, granting console access to every VM looks like:
-
-                pveum acl modify /vms --tokens '\(token)' --roles PVEVMUser
-
-                PVEVMUser covers VM.Audit (see them), VM.Console (open them) and \
-                VM.PowerMgmt (start and stop them). Then click Refresh.
-                """
-            alert.addButton(withTitle: "Copy Command")
-            alert.addButton(withTitle: "OK")
-            if alert.runModal() == .alertFirstButtonReturn {
-                let command = "pveum acl modify /vms --tokens '\(token)' --roles PVEVMUser"
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(command, forType: .string)
-            }
-        }
+        persist(profile: profile, secret: secret)
+        primaryProfileID = profile.id
+        coordinator.setProfiles(PVEProfileStore.shared.profiles)
+        coordinator.signIn(profile.id)
     }
 
     private func persist(profile: PVEServerProfile, secret: String) {
@@ -521,30 +554,15 @@ final class PVEConnectWindowController: NSWindowController, NSTableViewDataSourc
     }
 
     @objc private func refresh(_ sender: Any?) {
-        guard let client else { return }
-        setBusy(true, message: "Refreshing…")
-        Task { @MainActor [weak self] in
-            do {
-                let fetched = try await client.listGuests()
-                guard let self else { return }
-                self.guests = fetched
-                self.applyFilter()
-                self.setBusy(false, message: "\(fetched.count) guest\(fetched.count == 1 ? "" : "s").")
-                if fetched.isEmpty, let profile = PVEProfileStore.shared.profiles.first {
-                    self.explainEmptyList(client: client, profile: profile)
-                }
-            } catch {
-                guard let self else { return }
-                self.setBusy(false, message: nil)
-                self.presentError(error, title: "Could not refresh the guest list")
-            }
-        }
+        guard let id = currentSelectionInstanceID() else { return }
+        coordinator.refresh(id)
     }
 
     @objc private func openSelectedConsole(_ sender: Any?) {
-        guard let guest = selectedGuest(), let client else { return }
+        guard let guestRow = selectedGuestRow(), let client = coordinator.client(for: guestRow.instanceID) else { return }
+        let guest = guestRow.guest
         guard guest.isRunning else {
-            offerToStart(guest, client: client)
+            offerToStart(guest, client: client, instanceID: guestRow.instanceID)
             return
         }
         onOpenConsole?(guest, client)
@@ -552,7 +570,7 @@ final class PVEConnectWindowController: NSWindowController, NSTableViewDataSourc
 
     /// A stopped guest has no console to attach to. Rather than refuse, offer the one
     /// thing the user obviously wants — start it, then connect once it is up.
-    private func offerToStart(_ guest: PVEGuest, client: PVEClient) {
+    private func offerToStart(_ guest: PVEGuest, client: PVEClient, instanceID: UUID) {
         guard PVEPowerAction.start.isAvailable(for: guest) else {
             showStatus("\(guest.name) is \(guest.status).", isError: true)
             return
@@ -572,14 +590,14 @@ final class PVEConnectWindowController: NSWindowController, NSTableViewDataSourc
                 try await client.awaitTask(node: guest.node, upid: upid)
                 guard let self else { return }
                 self.setBusy(false, message: "\(guest.name) started.")
-                self.refresh(nil)
+                self.coordinator.refresh(instanceID)
                 // The task finishing means QEMU is up; SPICE is ready at that point.
                 self.onOpenConsole?(guest, client)
             } catch {
                 guard let self else { return }
                 self.setBusy(false, message: nil)
                 self.presentError(error, title: "Could not start \(guest.name)")
-                self.refresh(nil)
+                self.coordinator.refresh(instanceID)
             }
         }
     }
@@ -592,6 +610,44 @@ final class PVEConnectWindowController: NSWindowController, NSTableViewDataSourc
 
     func windowDidBecomeKey(_ notification: Notification) {
         Self.log.info("connect activated at \(NSStringFromRect(self.window?.frame ?? .zero), privacy: .public)")
+    }
+
+    // MARK: - Fleet state
+
+    private func handleFleetStateChanged(_ state: PVEFleetState) {
+        refreshTree()
+        updatePrimaryFormState()
+        diagnoseEmptyInstancesIfNeeded(state)
+    }
+
+    /// An instance that lists zero guests is ambiguous — Proxmox filters the listing
+    /// by permission and returns an empty array rather than a 403 — so ask what the
+    /// token can actually see, and report it on that row rather than over the whole
+    /// app. Clears the hint once the instance stops being signed-in-and-empty, so a
+    /// stale diagnosis from a previous sign-in doesn't linger.
+    private func diagnoseEmptyInstancesIfNeeded(_ state: PVEFleetState) {
+        for instance in state.instances {
+            if case .signedIn(let guests) = instance.state, guests.isEmpty {
+                diagnoseIfEmpty(instance)
+            } else {
+                emptyListHints[instance.id] = nil
+                diagnosedInstances.remove(instance.id)
+            }
+        }
+    }
+
+    private func diagnoseIfEmpty(_ instance: PVEInstanceSnapshot) {
+        guard case .signedIn(let guests) = instance.state, guests.isEmpty,
+              let client = coordinator.client(for: instance.id),
+              diagnosedInstances.contains(instance.id) == false else { return }
+        diagnosedInstances.insert(instance.id)
+        Task { @MainActor [weak self] in
+            guard let self, let hint = await client.diagnoseEmptyGuestList() else { return }
+            self.emptyListHints[instance.id] = hint
+            if let row = self.instanceRowCache[instance.id] {
+                self.outlineView.reloadItem(row)
+            }
+        }
     }
 
     // MARK: - Power
@@ -615,18 +671,57 @@ final class PVEConnectWindowController: NSWindowController, NSTableViewDataSourc
         }
     }
 
-    private func rebuildPowerMenus() {
+    private func rebuildFooterPowerMenu() {
         let guest = selectedGuest()
-
         let pullDown = NSMenu()
         // Item 0 of a pull-down is its label, never selected.
         pullDown.addItem(NSMenuItem(title: "Power", action: nil, keyEquivalent: ""))
         for item in powerMenuItems(for: guest) { pullDown.addItem(item) }
         powerButton.menu = pullDown
         powerButton.isEnabled = guest != nil
+    }
+
+    /// A server has no power state of its own, so its context menu offers the
+    /// operations that make sense for a *connection* instead: Sign In, Sign Out,
+    /// Refresh, and — only while its guest list is unexplained — Copy Command.
+    private func instanceMenuItems(for row: PVEFleetInstanceRow) -> [NSMenuItem] {
+        let state = row.snapshot.state
+
+        let signIn = NSMenuItem(title: "Sign In", action: #selector(instanceSignIn(_:)), keyEquivalent: "")
+        signIn.target = self
+        signIn.isEnabled = state == .signedOut || state.isFailed
+
+        let signOut = NSMenuItem(title: "Sign Out", action: #selector(instanceSignOut(_:)), keyEquivalent: "")
+        signOut.target = self
+        signOut.isEnabled = state != .signedOut
+
+        let refreshItem = NSMenuItem(title: "Refresh", action: #selector(instanceRefresh(_:)), keyEquivalent: "")
+        refreshItem.target = self
+        refreshItem.isEnabled = state.isSignedIn
+
+        var items = [signIn, signOut, refreshItem]
+        if emptyListHints[row.id] != nil {
+            items.append(.separator())
+            let copy = NSMenuItem(title: "Copy Command", action: #selector(copyACLCommand(_:)), keyEquivalent: "")
+            copy.target = self
+            items.append(copy)
+        }
+        return items
+    }
+
+    /// Right-clicking a row acts on that row, which means selecting it first —
+    /// otherwise the menu would apply to whatever was selected before. The menu itself
+    /// differs by row kind: guest rows get Open Console + power actions, instance rows
+    /// get Sign In / Sign Out / Refresh — power has no meaning for a server.
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        let clicked = outlineView.clickedRow
+        if clicked >= 0, outlineView.selectedRow != clicked {
+            outlineView.selectRowIndexes(IndexSet(integer: clicked), byExtendingSelection: false)
+        }
 
         contextMenu.removeAllItems()
-        if let guest {
+        if let guestRow = selectedGuestRow() {
+            let guest = guestRow.guest
             let header = NSMenuItem(title: "\(guest.name) (\(guest.vmid))", action: nil, keyEquivalent: "")
             header.isEnabled = false
             contextMenu.addItem(header)
@@ -637,31 +732,76 @@ final class PVEConnectWindowController: NSWindowController, NSTableViewDataSourc
             contextMenu.addItem(open)
             contextMenu.addItem(.separator())
             for item in powerMenuItems(for: guest) { contextMenu.addItem(item) }
+        } else if let instanceRow = selectedInstanceRow() {
+            for item in instanceMenuItems(for: instanceRow) { contextMenu.addItem(item) }
         }
+        rebuildFooterPowerMenu()
     }
 
-    /// Right-clicking a row acts on that row, which means selecting it first —
-    /// otherwise the menu would apply to whatever was selected before.
-    func menuNeedsUpdate(_ menu: NSMenu) {
-        let clicked = tableView.clickedRow
-        if clicked >= 0, clicked < visibleGuests.count, tableView.selectedRow != clicked {
-            tableView.selectRowIndexes(IndexSet(integer: clicked), byExtendingSelection: false)
-        }
-        rebuildPowerMenus()
+    private func selectedItem() -> Any? {
+        let row = outlineView.selectedRow
+        guard row >= 0 else { return nil }
+        return outlineView.item(atRow: row)
     }
 
-    private func selectedGuest() -> PVEGuest? {
-        let row = tableView.selectedRow
-        guard row >= 0, row < visibleGuests.count else { return nil }
-        return visibleGuests[row]
+    private func selectedGuestRow() -> PVEFleetGuestRow? { selectedItem() as? PVEFleetGuestRow }
+    private func selectedInstanceRow() -> PVEFleetInstanceRow? { selectedItem() as? PVEFleetInstanceRow }
+    private func selectedGuest() -> PVEGuest? { selectedGuestRow()?.guest }
+
+    /// The instance behind whatever is selected — a guest row's parent, or an
+    /// instance row itself. Drives "refresh on reveal" and the header Refresh button.
+    private func currentSelectionInstanceID() -> UUID? {
+        if let guestRow = selectedGuestRow() { return guestRow.instanceID }
+        if let instanceRow = selectedInstanceRow() { return instanceRow.id }
+        return nil
+    }
+
+    @objc private func instanceSignIn(_ sender: Any?) {
+        guard let row = selectedInstanceRow() else { return }
+        coordinator.signIn(row.id)
+    }
+
+    @objc private func instanceSignOut(_ sender: Any?) {
+        guard let row = selectedInstanceRow() else { return }
+        coordinator.signOut(row.id)
+    }
+
+    @objc private func instanceRefresh(_ sender: Any?) {
+        guard let row = selectedInstanceRow() else { return }
+        coordinator.refresh(row.id)
+    }
+
+    @objc private func copyACLCommand(_ sender: Any?) {
+        guard let row = selectedInstanceRow() else { return }
+        let profile = row.snapshot.profile
+        let token = profile.authKind == .apiToken ? profile.tokenID : profile.credentials(secret: "").displayUser
+        let command = "pveum acl modify /vms --tokens '\(token)' --roles PVEVMUser"
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(command, forType: .string)
+        showStatus("ACL command copied to clipboard.", isError: false)
+    }
+
+    @objc private func outlineDoubleClicked(_ sender: Any?) {
+        if let row = selectedInstanceRow() {
+            if outlineView.isItemExpanded(row) {
+                outlineView.collapseItem(row)
+            } else {
+                outlineView.expandItem(row)
+            }
+            return
+        }
+        openSelectedConsole(sender)
     }
 
     @objc private func powerActionSelected(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String,
               let action = PVEPowerAction(rawValue: raw),
-              let guest = selectedGuest(), let client else { return }
+              let guestRow = selectedGuestRow(),
+              let client = coordinator.client(for: guestRow.instanceID) else { return }
+        let guest = guestRow.guest
         guard confirm(action, on: guest) else { return }
 
+        let instanceID = guestRow.instanceID
         setBusy(true, message: "\(action.title) \(guest.name)…")
         Task { @MainActor [weak self] in
             do {
@@ -669,14 +809,14 @@ final class PVEConnectWindowController: NSWindowController, NSTableViewDataSourc
                 try await client.awaitTask(node: guest.node, upid: upid)
                 guard let self else { return }
                 self.setBusy(false, message: "\(guest.name): \(action.title.lowercased()) completed.")
-                self.refresh(nil)
+                self.coordinator.refresh(instanceID)
             } catch {
                 guard let self else { return }
                 self.setBusy(false, message: nil)
                 self.showStatus("\(action.title) failed.", isError: true)
                 self.presentError(error, title: "Could not \(action.title.lowercased()) \(guest.name)")
                 // State may still have moved even on failure — re-read rather than guess.
-                self.refresh(nil)
+                self.coordinator.refresh(instanceID)
             }
         }
     }
@@ -697,40 +837,183 @@ final class PVEConnectWindowController: NSWindowController, NSTableViewDataSourc
     // MARK: - Filtering
 
     func controlTextDidChange(_ obj: Notification) {
-        if obj.object as AnyObject === searchField { applyFilter() }
+        if obj.object as AnyObject === searchField { refreshTree() }
     }
 
-    private func applyFilter() {
-        let needle = searchField.stringValue.trimmingCharacters(in: .whitespaces).lowercased()
-        visibleGuests = needle.isEmpty ? guests : guests.filter {
-            $0.name.lowercased().contains(needle)
-                || String($0.vmid).contains(needle)
-                || $0.node.lowercased().contains(needle)
+    private func guestRowKey(instanceID: UUID, guest: PVEGuest) -> String { "\(instanceID)|\(guest.id)" }
+
+    private func instanceRow(for instance: PVEInstanceSnapshot) -> PVEFleetInstanceRow {
+        if let existing = instanceRowCache[instance.id] {
+            existing.snapshot = instance
+            return existing
         }
-        tableView.reloadData()
-        updateOpenButton()
-        rebuildPowerMenus()
+        let row = PVEFleetInstanceRow(snapshot: instance)
+        instanceRowCache[instance.id] = row
+        return row
     }
 
-    // MARK: - Table
+    private func guestRow(for guest: PVEGuest, instanceID: UUID) -> PVEFleetGuestRow {
+        let key = guestRowKey(instanceID: instanceID, guest: guest)
+        if let existing = guestRowCache[key] {
+            existing.guest = guest
+            return existing
+        }
+        let row = PVEFleetGuestRow(instanceID: instanceID, guest: guest)
+        guestRowCache[key] = row
+        return row
+    }
 
-    func numberOfRows(in tableView: NSTableView) -> Int { visibleGuests.count }
+    private func guestMatches(_ guest: PVEGuest, _ needle: String) -> Bool {
+        guest.name.lowercased().contains(needle)
+            || String(guest.vmid).contains(needle)
+            || guest.node.lowercased().contains(needle)
+    }
 
-    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        guard row < visibleGuests.count, let identifier = tableColumn?.identifier.rawValue else { return nil }
-        let guest = visibleGuests[row]
+    /// Rebuilds the visible rows from `coordinator.state`, filtered by the search
+    /// field. An instance is kept when its own name matches or any guest of its does;
+    /// a kept instance shows only its matching guests, and is auto-expanded so the
+    /// match isn't hidden under a collapsed disclosure triangle.
+    private func refreshTree() {
+        let needle = searchField.stringValue.trimmingCharacters(in: .whitespaces).lowercased()
+        var newVisibleInstances: [PVEFleetInstanceRow] = []
+        var newVisibleGuestRows: [UUID: [PVEFleetGuestRow]] = [:]
+        var liveInstanceIDs: Set<UUID> = []
+        var liveGuestKeys: Set<String> = []
+
+        for instance in coordinator.state.instances {
+            liveInstanceIDs.insert(instance.id)
+            let row = instanceRow(for: instance)
+            let allGuestRows = instance.state.guests.map { guest -> PVEFleetGuestRow in
+                liveGuestKeys.insert(guestRowKey(instanceID: instance.id, guest: guest))
+                return guestRow(for: guest, instanceID: instance.id)
+            }
+
+            if needle.isEmpty {
+                newVisibleInstances.append(row)
+                newVisibleGuestRows[instance.id] = allGuestRows
+                continue
+            }
+
+            let nameMatches = instance.profile.displayName.lowercased().contains(needle)
+            let matchingGuestRows = allGuestRows.filter { guestMatches($0.guest, needle) }
+            guard nameMatches || matchingGuestRows.isEmpty == false else { continue }
+            newVisibleInstances.append(row)
+            newVisibleGuestRows[instance.id] = matchingGuestRows
+        }
+
+        // Drop cache entries for servers/guests no longer in the fleet so a later id
+        // reusing the same UUID (or vmid, on another node) can't inherit a stale row.
+        instanceRowCache = instanceRowCache.filter { liveInstanceIDs.contains($0.key) }
+        guestRowCache = guestRowCache.filter { liveGuestKeys.contains($0.key) }
+
+        let previouslyKnown = knownInstanceIDs
+        knownInstanceIDs = liveInstanceIDs
+        visibleInstanceRows = newVisibleInstances
+        visibleGuestRowsByInstance = newVisibleGuestRows
+
+        outlineView.reloadData()
+
+        for row in newVisibleInstances where needle.isEmpty == false || previouslyKnown.contains(row.id) == false {
+            outlineView.expandItem(row)
+        }
+
+        updateActionAvailability()
+        rebuildFooterPowerMenu()
+    }
+
+    private func updateActionAvailability() {
+        refreshButton.isEnabled = coordinator.state.instances.isEmpty == false
+        updateOpenButton()
+    }
+
+    // MARK: - Outline
+
+    func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
+        guard let item else { return visibleInstanceRows.count }
+        guard let row = item as? PVEFleetInstanceRow else { return 0 }
+        return visibleGuestRowsByInstance[row.id]?.count ?? 0
+    }
+
+    func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
+        guard let item else { return visibleInstanceRows[index] }
+        let row = item as! PVEFleetInstanceRow
+        return visibleGuestRowsByInstance[row.id]![index]
+    }
+
+    func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
+        item is PVEFleetInstanceRow
+    }
+
+    func outlineView(_ outlineView: NSOutlineView, heightOfRowByItem item: Any) -> CGFloat {
+        if let instanceRow = item as? PVEFleetInstanceRow, emptyListHints[instanceRow.id] != nil {
+            return 38
+        }
+        return 22
+    }
+
+    func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
+        guard let identifier = tableColumn?.identifier.rawValue else { return nil }
+        if let instanceRow = item as? PVEFleetInstanceRow {
+            guard identifier == "name" else { return nil }
+            return instanceCellView(for: instanceRow)
+        }
+        guard let guestRow = item as? PVEFleetGuestRow else { return nil }
+        return guestCellView(for: guestRow, columnIdentifier: identifier)
+    }
+
+    private func stateSuffix(_ state: PVEInstanceState) -> String? {
+        switch state {
+        case .signedOut:
+            return nil
+        case .signingIn:
+            return "signing in…"
+        case .failed(let error):
+            return truncated(sanitized(error.description))
+        case .signedIn(let guests):
+            return "\(guests.count) guest\(guests.count == 1 ? "" : "s")"
+        }
+    }
+
+    private func instanceCellView(for row: PVEFleetInstanceRow) -> NSView {
+        let state = row.snapshot.state
+        let title = stateSuffix(state).map { "\(row.snapshot.profile.displayName) — \($0)" } ?? row.snapshot.profile.displayName
+
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 1
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        let titleField = NSTextField(labelWithString: title)
+        titleField.lineBreakMode = .byTruncatingTail
+        titleField.textColor = state.isFailed ? .systemRed : .labelColor
+        stack.addArrangedSubview(titleField)
+
+        if let hint = emptyListHints[row.id] {
+            let subtitleField = NSTextField(labelWithString: truncated(sanitized(hint)))
+            subtitleField.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+            subtitleField.textColor = .secondaryLabelColor
+            subtitleField.lineBreakMode = .byTruncatingTail
+            stack.addArrangedSubview(subtitleField)
+        }
+        return stack
+    }
+
+    private func guestCellView(for row: PVEFleetGuestRow, columnIdentifier: String) -> NSView {
+        let guest = row.guest
         let text: String
-        switch identifier {
+        switch columnIdentifier {
         case "name":   text = guest.name
         case "vmid":   text = String(guest.vmid)
         case "node":   text = guest.node
         default:       text = guest.status
         }
 
-        let cell = tableView.makeView(withIdentifier: tableColumn!.identifier, owner: self) as? NSTextField
+        let identifier = NSUserInterfaceItemIdentifier(columnIdentifier)
+        let cell = outlineView.makeView(withIdentifier: identifier, owner: self) as? NSTextField
             ?? {
                 let field = NSTextField(labelWithString: "")
-                field.identifier = tableColumn!.identifier
+                field.identifier = identifier
                 field.lineBreakMode = .byTruncatingTail
                 return field
             }()
@@ -741,13 +1024,23 @@ final class PVEConnectWindowController: NSWindowController, NSTableViewDataSourc
         return cell
     }
 
-    func tableViewSelectionDidChange(_ notification: Notification) {
-        updateOpenButton()
-        rebuildPowerMenus()
+    func outlineViewSelectionDidChange(_ notification: Notification) {
+        updateActionAvailability()
+        rebuildFooterPowerMenu()
     }
 
     private func updateOpenButton() {
         openButton.isEnabled = selectedGuest()?.isRunning ?? false
+    }
+
+    private func sanitized(_ text: String) -> String {
+        text.replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func truncated(_ text: String, limit: Int = 100) -> String {
+        guard text.count > limit else { return text }
+        return text.prefix(limit) + "…"
     }
 
     // MARK: - Status
@@ -755,8 +1048,6 @@ final class PVEConnectWindowController: NSWindowController, NSTableViewDataSourc
     private func setBusy(_ busy: Bool, message: String?) {
         if busy { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
         connectButton.isEnabled = !busy
-        refreshButton.isEnabled = !busy && client != nil
-        powerButton.isEnabled = !busy && selectedGuest() != nil
         if let message { showStatus(message, isError: false) }
     }
 
