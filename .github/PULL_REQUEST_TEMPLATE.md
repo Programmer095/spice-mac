@@ -11,6 +11,7 @@
 <!-- How did you verify this? -->
 
 - [ ] `cd Packages/VVConfig && swift run vvcheck` passes
+- [ ] `cd Packages/PVEClient && swift run pvecheck` passes
 - [ ] `cd Packages/SpiceInputMap && swift run inputcheck` passes
 - [ ] For app/native changes: built `./scripts/build-app.sh` and ran against a VM
 - [ ] For CocoaSpice fork changes: updated `ThirdParty/CocoaSpice/FORK-NOTES.md`
