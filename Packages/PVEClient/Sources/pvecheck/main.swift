@@ -324,4 +324,50 @@ t.test("the spice failure explains the display-type cause and the fix") {
     t.expect(error.description.lowercased().contains("standard vga"), "names the default that does not work")
 }
 
+// MARK: - Server profiles
+
+t.test("keychain account is scoped per server and user so several can coexist") {
+    var a = PVEServerProfile(label: "Home", host: "10.0.0.1")
+    a.tokenID = "root@pam!spicemac"
+    var b = PVEServerProfile(label: "Site B", host: "10.0.0.2")
+    b.tokenID = "root@pam!spicemac"
+    t.expectEqual(a.keychainAccount, "10.0.0.1:8006|root@pam!spicemac")
+    t.expect(a.keychainAccount != b.keychainAccount, "different hosts must not share an item")
+}
+
+t.test("password profiles key their keychain item on user@realm") {
+    var p = PVEServerProfile(label: "Home", host: "pve.lan")
+    p.authKind = .password
+    p.username = "cory"
+    p.realm = "pve"
+    t.expectEqual(p.keychainAccount, "pve.lan:8006|cory@pve")
+}
+
+t.test("a token profile is incomplete without a full token id") {
+    var p = PVEServerProfile(label: "Home", host: "pve.lan")
+    p.tokenID = "root@pam"
+    t.expectEqual(p.isComplete, false)
+    p.tokenID = "root@pam!spicemac"
+    t.expectEqual(p.isComplete, true)
+}
+
+t.test("a profile with no host is incomplete whatever else is set") {
+    var p = PVEServerProfile(label: "Home", host: "   ")
+    p.tokenID = "root@pam!spicemac"
+    t.expectEqual(p.isComplete, false)
+}
+
+t.test("display name falls back to the host when unlabelled") {
+    t.expectEqual(PVEServerProfile(label: "", host: "pve.lan").displayName, "pve.lan")
+    t.expectEqual(PVEServerProfile(label: "Home", host: "pve.lan").displayName, "Home")
+}
+
+t.test("profiles round-trip through Codable so they can be persisted") {
+    var p = PVEServerProfile(label: "Home", host: "pve.lan")
+    p.tokenID = "root@pam!spicemac"
+    let data = try JSONEncoder().encode(p)
+    let back = try JSONDecoder().decode(PVEServerProfile.self, from: data)
+    t.expectEqual(back, p)
+}
+
 t.finishAndExit()
