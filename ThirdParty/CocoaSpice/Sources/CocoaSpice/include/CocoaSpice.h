@@ -32,6 +32,7 @@
 #include "CSScreenshot.h"
 #include "CSSession.h"
 #include "CSSession+Sharing.h"
+#include "CSSession+FileTransfer.h" // spice-mac fork addition
 #include "CSUSBDevice.h"
 #include "CSUSBManager.h"
 #include "CSUSBManagerDelegate.h"

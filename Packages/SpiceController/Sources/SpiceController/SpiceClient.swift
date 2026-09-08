@@ -46,6 +46,32 @@ public final class SpiceClient: NSObject, ObservableObject {
     /// USB redirection manager for the active connection, if any.
     public var usbManager: CSUSBManager? { connection?.usbManager }
 
+    /// Host directory offered to the guest over WebDAV, applied at `connect()`.
+    /// Read-only unless explicitly set otherwise: a writable share lets a hostile
+    /// guest write into it. Requires `spice-webdavd` in the guest to appear.
+    public var sharedDirectory: (path: String, readOnly: Bool)?
+
+    /// Whether the guest agent is present and permits file transfer.
+    public var canSendFiles: Bool { connection?.session.canSendFiles ?? false }
+
+    /// Copy files into the guest. One-way by protocol design — there is no guest →
+    /// host counterpart; use `sharedDirectory` for that direction.
+    public func sendFiles(_ urls: [URL],
+                          progress: ((Double) -> Void)? = nil,
+                          completion: ((Error?) -> Void)? = nil) {
+        guard let session = connection?.session else {
+            completion?(NSError(domain: "org.spicemac.FileTransfer", code: 2, userInfo: [
+                NSLocalizedDescriptionKey: "Not connected.",
+            ]))
+            return
+        }
+        session.sendFiles(urls, progress: progress, completion: completion)
+    }
+
+    public func cancelFileTransfers() {
+        connection?.session.cancelFileTransfers()
+    }
+
     private let parameters: SpiceConnectionParameters
     private let pasteboard: SpicePasteboardBridge
     /// Whether a connection attempt has already been made. The Proxmox ticket is
@@ -122,6 +148,12 @@ public final class SpiceClient: NSObject, ObservableObject {
         // Clipboard sharing (opt-out; requires the guest vdagent to take effect).
         conn.session.shareClipboard = shareClipboard
         conn.session.pasteboardDelegate = pasteboard
+
+        // Must be set before connect(): the WebDAV channel is negotiated during
+        // session setup, so a directory applied afterwards is not offered.
+        if let sharedDirectory {
+            conn.session.setSharedDirectory(sharedDirectory.path, readOnly: sharedDirectory.readOnly)
+        }
 
         connection = conn
 

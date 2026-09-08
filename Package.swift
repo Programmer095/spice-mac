@@ -11,7 +11,7 @@ import PackageDescription
 //        ./scripts/fetch-sysroot.sh
 //  * Build & bundle into SpiceMac.app with:  ./scripts/build-app.sh
 //
-// The pure-Swift libraries (VVConfig, SpiceInputMap) build and test on their own
+// The pure-Swift libraries (VVConfig, PVEClient, SpiceInputMap) build and test on their own
 // with just the toolchain — see their packages under Packages/.
 
 // The native SPICE stack is linked as @rpath-relocatable *.framework bundles from
@@ -61,6 +61,7 @@ let package = Package(
     ],
     dependencies: [
         .package(path: "Packages/VVConfig"),
+        .package(path: "Packages/PVEClient"),
         .package(path: "Packages/SpiceInputMap"),
         .package(path: "Packages/DisplayScale"),
         .package(path: "ThirdParty/CocoaSpice"),
@@ -84,6 +85,7 @@ let package = Package(
             dependencies: [
                 "SpiceController",
                 .product(name: "VVConfig", package: "VVConfig"),
+                .product(name: "PVEClient", package: "PVEClient"),
                 .product(name: "SpiceInputMap", package: "SpiceInputMap"),
                 .product(name: "DisplayScale", package: "DisplayScale"),
                 .product(name: "CocoaSpice", package: "CocoaSpice"),
