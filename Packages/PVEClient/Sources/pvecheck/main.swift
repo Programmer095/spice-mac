@@ -477,6 +477,39 @@ t.test("every guest across the fleet is reachable in one list") {
     t.expectEqual(state.allGuests.count, 2)
 }
 
+// MARK: - Fleet coordinator
+
+t.test("signIn(usingSecret:) never touches the secret provider") {
+    final class Flag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = false
+        func mark() { lock.lock(); value = true; lock.unlock() }
+        var wasCalled: Bool { lock.lock(); defer { lock.unlock() }; return value }
+    }
+    let providerCalled = Flag()
+    var profile = PVEServerProfile(label: "Home", host: "127.0.0.1", port: 1)
+    profile.tokenID = "root@pam!spicemac"
+    let id = profile.id
+    let done = DispatchSemaphore(value: 0)
+
+    Task { @MainActor in
+        let coordinator = PVEFleetCoordinator(trustDelegate: nil) { _ in
+            providerCalled.mark()
+            return "provider-secret"
+        }
+        coordinator.setProfiles([profile])
+        coordinator.onChange = { state in
+            // Skip the transient .signingIn step; only the eventual outcome matters.
+            guard state.instance(id)?.state != .signingIn else { return }
+            done.signal()
+        }
+        coordinator.signIn(id, usingSecret: "typed-secret")
+    }
+    _ = done.wait(timeout: .now() + 10)
+    t.expect(providerCalled.wasCalled == false,
+             "an explicit secret must bypass secretProvider entirely")
+}
+
 // MARK: - Prompt queue
 
 t.test("prompts run one at a time even when requested concurrently") {

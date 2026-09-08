@@ -38,14 +38,33 @@ public final class PVEFleetCoordinator {
         }
     }
 
-    public func signIn(_ id: UUID) {
+    /// Signs in an instance. With `secret` nil (the default), the secret comes from
+    /// `secretProvider` by way of the prompt queue — this is the path `signInAll()` and
+    /// the tree's per-instance Sign In use, so several servers can't stack Keychain
+    /// prompts at launch.
+    ///
+    /// With `secret` non-nil, it is used as-is and both `secretProvider` and the prompt
+    /// queue are skipped: the caller just typed this, nobody needs prompting for it, and
+    /// queuing it would serialize it behind other servers' prompts for no reason. This is
+    /// the only way to sign in with a secret that isn't in the Keychain (rememberSecret
+    /// off, or not yet saved).
+    public func signIn(_ id: UUID, usingSecret secret: String? = nil) {
         guard let instance = state.instance(id), instance.profile.isComplete else { return }
         apply(.signInStarted(id))
+        let profile = instance.profile
+
+        if let secret {
+            guard secret.isEmpty == false else {
+                apply(.signInFailed(id, .unauthorized))
+                return
+            }
+            Task { [weak self] in await self?.performSignIn(id, profile: profile, secret: secret) }
+            return
+        }
 
         Task { [weak self] in
             guard let self else { return }
             // The secret read can prompt, so it queues; the request that follows does not.
-            let profile = instance.profile
             let secret = await self.prompts.run { [secretProvider = self.secretProvider] in
                 secretProvider(profile)
             }
@@ -53,18 +72,22 @@ public final class PVEFleetCoordinator {
                 self.apply(.signInFailed(id, .unauthorized))
                 return
             }
-            let client = PVEClient(server: profile.server,
-                                   credentials: profile.credentials(secret: secret),
-                                   trustDelegate: self.trustDelegate)
-            self.clients[id] = client
-            do {
-                let guests = try await client.listGuests()
-                self.apply(.guestsLoaded(id, guests))
-            } catch let error as PVEError {
-                self.apply(.signInFailed(id, error))
-            } catch {
-                self.apply(.signInFailed(id, .transport(error.localizedDescription)))
-            }
+            await self.performSignIn(id, profile: profile, secret: secret)
+        }
+    }
+
+    private func performSignIn(_ id: UUID, profile: PVEServerProfile, secret: String) async {
+        let client = PVEClient(server: profile.server,
+                               credentials: profile.credentials(secret: secret),
+                               trustDelegate: trustDelegate)
+        clients[id] = client
+        do {
+            let guests = try await client.listGuests()
+            apply(.guestsLoaded(id, guests))
+        } catch let error as PVEError {
+            apply(.signInFailed(id, error))
+        } catch {
+            apply(.signInFailed(id, .transport(error.localizedDescription)))
         }
     }
 

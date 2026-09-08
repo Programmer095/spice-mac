@@ -109,6 +109,10 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
     /// Everything else in the window (the tree, sign-in-all-on-reveal) is driven by
     /// the coordinator across every configured server, not just this one.
     private var primaryProfileID: UUID?
+    /// Set by `connect()` while a form-driven sign-in is in flight, so the coordinator's
+    /// eventual success/failure can decide whether to persist — a mistyped secret must
+    /// never overwrite a working one in the Keychain.
+    private var pendingPrimaryPersist: (id: UUID, profile: PVEServerProfile, secret: String)?
 
     /// Row wrappers, reused across reloads by id so `NSOutlineView` keeps expansion
     /// and selection state stable even though the coordinator hands us fresh struct
@@ -527,20 +531,26 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
             return
         }
 
-        persist(profile: profile, secret: secret)
         primaryProfileID = profile.id
-        coordinator.setProfiles(PVEProfileStore.shared.profiles)
-        coordinator.signIn(profile.id)
+        pendingPrimaryPersist = (id: profile.id, profile: profile, secret: secret)
+        coordinator.setProfiles(updatedProfiles(with: profile))
+        coordinator.signIn(profile.id, usingSecret: secret)
     }
 
-    private func persist(profile: PVEServerProfile, secret: String) {
+    /// The stored profile list with `profile` in the first slot, without writing it to
+    /// disk — used to tell the coordinator about an edit before it's confirmed to work.
+    private func updatedProfiles(with profile: PVEServerProfile) -> [PVEServerProfile] {
         var profiles = PVEProfileStore.shared.profiles
         if profiles.isEmpty {
             profiles = [profile]
         } else {
             profiles[0] = profile
         }
-        PVEProfileStore.shared.profiles = profiles
+        return profiles
+    }
+
+    private func persist(profile: PVEServerProfile, secret: String) {
+        PVEProfileStore.shared.profiles = updatedProfiles(with: profile)
 
         guard profile.rememberSecret else {
             PVEKeychain.delete(account: profile.keychainAccount)
@@ -616,8 +626,24 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
 
     private func handleFleetStateChanged(_ state: PVEFleetState) {
         refreshTree()
+        resolvePendingPrimaryPersist(state)
         updatePrimaryFormState()
         diagnoseEmptyInstancesIfNeeded(state)
+    }
+
+    /// Commits the form's typed secret to the Keychain only once the coordinator
+    /// confirms it actually works; a failure leaves whatever was already stored alone.
+    private func resolvePendingPrimaryPersist(_ state: PVEFleetState) {
+        guard let pending = pendingPrimaryPersist, let instance = state.instance(pending.id) else { return }
+        switch instance.state {
+        case .signedIn:
+            persist(profile: pending.profile, secret: pending.secret)
+            pendingPrimaryPersist = nil
+        case .failed:
+            pendingPrimaryPersist = nil
+        case .signedOut, .signingIn:
+            break
+        }
     }
 
     /// An instance that lists zero guests is ambiguous — Proxmox filters the listing
@@ -936,8 +962,8 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
 
     func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
         guard let item else { return visibleInstanceRows[index] }
-        let row = item as! PVEFleetInstanceRow
-        return visibleGuestRowsByInstance[row.id]![index]
+        guard let row = item as? PVEFleetInstanceRow else { return NSNull() }
+        return visibleGuestRowsByInstance[row.id]?[index] ?? NSNull()
     }
 
     func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
