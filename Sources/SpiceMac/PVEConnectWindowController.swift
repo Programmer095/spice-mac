@@ -53,9 +53,15 @@ final class PVEConnectWindowController: NSWindowController, NSTableViewDataSourc
     private var guests: [PVEGuest] = []
     private var visibleGuests: [PVEGuest] = []
 
+    /// Drives sign-in across the whole fleet. This window still only shows the first
+    /// configured server; the tree that surfaces the rest is a later step.
+    private let coordinator: PVEFleetCoordinator
+
     // MARK: - Lifecycle
 
     init() {
+        coordinator = PVEFleetCoordinator(trustDelegate: PVEProfileStore.shared,
+                                          secretProvider: { PVEProfileStore.shared.secret(for: $0) })
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 580),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable],
                               backing: .buffered,
@@ -79,6 +85,13 @@ final class PVEConnectWindowController: NSWindowController, NSTableViewDataSourc
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
+    /// Forwarded from the Manage Servers sheet. This window still only drives the
+    /// first configured server directly; the fleet as a whole is the coordinator's
+    /// concern until the tree view replaces this single-server display.
+    func setProfiles(_ profiles: [PVEServerProfile]) {
+        coordinator.setProfiles(profiles)
+    }
+
     /// Show the window; if a complete profile and a stored secret are already on hand,
     /// sign in straight away so the common case is "open app, see your VMs".
     func present(autoConnect: Bool = true) {
@@ -90,7 +103,7 @@ final class PVEConnectWindowController: NSWindowController, NSTableViewDataSourc
             Self.log.info("auto sign-in skipped: already signed in")
             return
         }
-        guard let profile = PVEProfileStore.shared.profile, profile.isComplete else {
+        guard let profile = PVEProfileStore.shared.profiles.first, profile.isComplete else {
             Self.log.info("auto sign-in skipped: no complete saved profile")
             return
         }
@@ -325,7 +338,7 @@ final class PVEConnectWindowController: NSWindowController, NSTableViewDataSourc
     // MARK: - Profile
 
     private func loadProfile() {
-        let profile = PVEProfileStore.shared.profile ?? PVEProfile()
+        let profile = PVEProfileStore.shared.profiles.first ?? PVEServerProfile()
         hostField.stringValue = profile.host
         portField.stringValue = String(profile.port)
         tokenIDField.stringValue = profile.tokenID
@@ -336,7 +349,7 @@ final class PVEConnectWindowController: NSWindowController, NSTableViewDataSourc
         authKindChanged()
 
         if profile.rememberSecret, profile.isComplete,
-           let secret = PVEKeychain.secret(account: profile.keychainAccount) {
+           let secret = PVEProfileStore.shared.secret(for: profile) {
             loadedSecret = secret
             if profile.authKind == .apiToken {
                 tokenSecretField.stringValue = secret
@@ -346,8 +359,11 @@ final class PVEConnectWindowController: NSWindowController, NSTableViewDataSourc
         }
     }
 
-    private func currentProfile() -> PVEProfile {
-        var profile = PVEProfile()
+    /// Starts from the stored first profile (if any) so its `id` and `label` survive
+    /// a save — this window only edits that one slot, it must not fork a new identity
+    /// for it on every Sign In.
+    private func currentProfile() -> PVEServerProfile {
+        var profile = PVEProfileStore.shared.profiles.first ?? PVEServerProfile()
         profile.host = hostField.stringValue.trimmingCharacters(in: .whitespaces)
         profile.port = Int(portField.stringValue) ?? 8006
         profile.authKind = authSelector.selectedSegment == 0 ? .apiToken : .password
@@ -455,7 +471,7 @@ final class PVEConnectWindowController: NSWindowController, NSTableViewDataSourc
     /// An empty guest list is ambiguous: Proxmox filters the cluster listing by
     /// permission and returns an empty array rather than a 403, so a token with no ACL
     /// looks exactly like a cluster with no VMs. Ask what the token can actually see.
-    private func explainEmptyList(client: PVEClient, profile: PVEProfile) {
+    private func explainEmptyList(client: PVEClient, profile: PVEServerProfile) {
         Task { @MainActor [weak self] in
             guard let self, let hint = await client.diagnoseEmptyGuestList() else { return }
             self.showStatus("No guests visible — check the token's permissions.", isError: true)
@@ -484,15 +500,23 @@ final class PVEConnectWindowController: NSWindowController, NSTableViewDataSourc
         }
     }
 
-    private func persist(profile: PVEProfile, secret: String) {
-        PVEProfileStore.shared.profile = profile
+    private func persist(profile: PVEServerProfile, secret: String) {
+        var profiles = PVEProfileStore.shared.profiles
+        if profiles.isEmpty {
+            profiles = [profile]
+        } else {
+            profiles[0] = profile
+        }
+        PVEProfileStore.shared.profiles = profiles
+
         guard profile.rememberSecret else {
             PVEKeychain.delete(account: profile.keychainAccount)
             loadedSecret = nil
             return
         }
+        // Rewriting an unchanged secret costs a second Keychain authorization prompt.
         guard secret != loadedSecret else { return }
-        PVEKeychain.save(secret: secret, account: profile.keychainAccount)
+        PVEProfileStore.shared.setSecret(secret, for: profile)
         loadedSecret = secret
     }
 
@@ -506,7 +530,7 @@ final class PVEConnectWindowController: NSWindowController, NSTableViewDataSourc
                 self.guests = fetched
                 self.applyFilter()
                 self.setBusy(false, message: "\(fetched.count) guest\(fetched.count == 1 ? "" : "s").")
-                if fetched.isEmpty, let profile = PVEProfileStore.shared.profile {
+                if fetched.isEmpty, let profile = PVEProfileStore.shared.profiles.first {
                     self.explainEmptyList(client: client, profile: profile)
                 }
             } catch {

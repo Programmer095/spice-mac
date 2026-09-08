@@ -30,6 +30,8 @@ enum MainMenu {
         fileItem.submenu = fileMenu
         fileMenu.addItem(withTitle: "Connect to Proxmox…",
                          action: #selector(AppDelegate.connectToProxmox(_:)), keyEquivalent: "n")
+        fileMenu.addItem(withTitle: "Manage Servers…",
+                         action: #selector(AppDelegate.manageServers(_:)), keyEquivalent: ",")
         fileMenu.addItem(withTitle: "Open…",
                          action: #selector(AppDelegate.openDocument(_:)), keyEquivalent: "o")
         fileMenu.addItem(withTitle: "Close",

@@ -23,6 +23,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// Keychain, which must not happen just because someone opened a `.vv` file.
     private var createdBrowser: PVEConnectWindowController?
 
+    private var manageServersController: PVEManageServersController?
+
     private var proxmoxBrowser: PVEConnectWindowController {
         if let createdBrowser { return createdBrowser }
         let controller = PVEConnectWindowController()
@@ -177,6 +179,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     @objc func connectToProxmox(_ sender: Any?) {
         didOpenAny = true
         proxmoxBrowser.present()
+    }
+
+    @objc func manageServers(_ sender: Any?) {
+        let controller = manageServersController ?? {
+            let controller = PVEManageServersController()
+            controller.onProfilesChanged = { [weak self] profiles in
+                self?.proxmoxBrowser.setProfiles(profiles)
+            }
+            manageServersController = controller
+            return controller
+        }()
+        controller.present(over: proxmoxBrowser.window)
     }
 
     /// Reached from the browser's own button, so the `.vv` route stays discoverable

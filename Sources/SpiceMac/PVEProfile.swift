@@ -3,50 +3,7 @@ import Foundation
 import OSLog
 import PVEClient
 
-/// The non-secret half of a saved Proxmox connection. The matching secret lives in
-/// the Keychain (see `PVEKeychain`) and is never written here.
-struct PVEProfile: Codable, Equatable {
-    enum AuthKind: String, Codable {
-        case apiToken
-        case password
-    }
-
-    var host: String = ""
-    var port: Int = 8006
-    var authKind: AuthKind = .apiToken
-    /// Full token identifier, e.g. `root@pam!spicemac`.
-    var tokenID: String = ""
-    var username: String = "root"
-    var realm: String = "pam"
-    var rememberSecret: Bool = true
-
-    var server: PVEServer { PVEServer(host: host, port: port) }
-
-    /// The account name used for the Keychain item.
-    var keychainAccount: String {
-        let user = authKind == .apiToken ? tokenID : "\(username)@\(realm)"
-        return PVEKeychain.account(host: host, port: port, user: user)
-    }
-
-    func credentials(secret: String) -> PVECredentials {
-        switch authKind {
-        case .apiToken:
-            return .apiToken(id: tokenID, secret: secret)
-        case .password:
-            return .password(username: username, realm: realm, password: secret)
-        }
-    }
-
-    var isComplete: Bool {
-        guard host.trimmingCharacters(in: .whitespaces).isEmpty == false else { return false }
-        switch authKind {
-        case .apiToken: return tokenID.contains("!") && tokenID.contains("@")
-        case .password: return username.isEmpty == false
-        }
-    }
-}
-
-/// Persistence for the saved profile and the trust-on-first-use certificate pins.
+/// Persistence for the configured fleet and the trust-on-first-use certificate pins.
 ///
 /// Also the app's `PVETrustDelegate`: it answers with the pinned fingerprint, and
 /// escalates anything unknown to a modal so the user makes the call, rather than the
@@ -54,24 +11,9 @@ struct PVEProfile: Codable, Equatable {
 final class PVEProfileStore: PVETrustDelegate {
     static let shared = PVEProfileStore()
 
-    private let profileKey = "ProxmoxProfile"
     private let pinsKey = "ProxmoxCertificatePins"
 
     private init() {}
-
-    var profile: PVEProfile? {
-        get {
-            guard let data = UserDefaults.standard.data(forKey: profileKey) else { return nil }
-            return try? JSONDecoder().decode(PVEProfile.self, from: data)
-        }
-        set {
-            guard let newValue, let data = try? JSONEncoder().encode(newValue) else {
-                UserDefaults.standard.removeObject(forKey: profileKey)
-                return
-            }
-            UserDefaults.standard.set(data, forKey: profileKey)
-        }
-    }
 
     // MARK: - PVETrustDelegate
 
@@ -104,5 +46,42 @@ final class PVEProfileStore: PVETrustDelegate {
     @MainActor
     func shouldTrustCertificate(host: String, fingerprint: String, isChange: Bool) async -> Bool {
         PVECertificatePrompt.ask(host: host, fingerprint: fingerprint, isChange: isChange)
+    }
+}
+
+extension PVEProfileStore {
+    private var profilesKey: String { "ProxmoxProfiles" }
+    private var legacyKey: String { "ProxmoxProfile" }
+
+    /// The configured fleet. On first read after upgrading, the pre-fleet single
+    /// profile is migrated in; the old key is left untouched so a downgrade still finds it.
+    var profiles: [PVEServerProfile] {
+        get {
+            if let data = UserDefaults.standard.data(forKey: profilesKey),
+               let decoded = try? JSONDecoder().decode([PVEServerProfile].self, from: data) {
+                return decoded
+            }
+            let migrated = PVEServerProfile.migratingLegacy(
+                UserDefaults.standard.data(forKey: legacyKey))
+            if migrated.isEmpty == false { self.profiles = migrated }
+            return migrated
+        }
+        set {
+            guard let data = try? JSONEncoder().encode(newValue) else { return }
+            UserDefaults.standard.set(data, forKey: profilesKey)
+        }
+    }
+
+    func secret(for profile: PVEServerProfile) -> String? {
+        guard profile.rememberSecret else { return nil }
+        return PVEKeychain.secret(account: profile.keychainAccount)
+    }
+
+    func setSecret(_ secret: String, for profile: PVEServerProfile) {
+        guard profile.rememberSecret, secret.isEmpty == false else {
+            PVEKeychain.delete(account: profile.keychainAccount)
+            return
+        }
+        PVEKeychain.save(secret: secret, account: profile.keychainAccount)
     }
 }
