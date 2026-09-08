@@ -477,4 +477,36 @@ t.test("every guest across the fleet is reachable in one list") {
     t.expectEqual(state.allGuests.count, 2)
 }
 
+// MARK: - Prompt queue
+
+t.test("prompts run one at a time even when requested concurrently") {
+    final class Tracker: @unchecked Sendable {
+        var active = 0
+        var peak = 0
+        let lock = NSLock()
+        func enter() { lock.lock(); active += 1; peak = max(peak, active); lock.unlock() }
+        func leave() { lock.lock(); active -= 1; lock.unlock() }
+    }
+    let tracker = Tracker()
+    let queue = PVEPromptQueue()
+    let done = DispatchSemaphore(value: 0)
+
+    Task {
+        await withTaskGroup(of: Void.self) { group in
+            for _ in 0..<8 {
+                group.addTask {
+                    await queue.run {
+                        tracker.enter()
+                        try? await Task.sleep(nanoseconds: 20_000_000)
+                        tracker.leave()
+                    }
+                }
+            }
+        }
+        done.signal()
+    }
+    _ = done.wait(timeout: .now() + 10)
+    t.expectEqual(tracker.peak, 1)
+}
+
 t.finishAndExit()
