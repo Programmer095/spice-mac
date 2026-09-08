@@ -147,7 +147,37 @@ public final class PVEClient {
 
     // MARK: - Request plumbing
 
+    /// Whether a 401 is worth one more attempt. Proxmox login tickets last about two
+    /// hours, so a fleet left open past that gets a 401 on a perfectly good password —
+    /// the only case where retrying can help. A token 401 means a bad token, and a 403
+    /// is a permissions problem; neither is fixed by trying again.
+    public static func shouldRetryAfterExpiredTicket(status: Int,
+                                                     credentials: PVECredentials,
+                                                     hasTicket: Bool) -> Bool {
+        guard status == 401, hasTicket else { return false }
+        if case .password = credentials { return true }
+        return false
+    }
+
     private func perform(path: String, method: String, body: Data?) async throws -> (Data, HTTPURLResponse) {
+        var (data, http) = try await send(path: path, method: method, body: body)
+        if Self.shouldRetryAfterExpiredTicket(status: http.statusCode,
+                                              credentials: credentials,
+                                              hasTicket: ticket != nil) {
+            ticket = nil
+            (data, http) = try await send(path: path, method: method, body: body)
+        }
+        switch http.statusCode {
+        case 200..<300:
+            return (data, http)
+        case 401, 403:
+            throw PVEError.unauthorized
+        default:
+            throw PVEError.http(status: http.statusCode, body: PVEProtocol.errorMessage(from: data))
+        }
+    }
+
+    private func send(path: String, method: String, body: Data?) async throws -> (Data, HTTPURLResponse) {
         guard let baseURL = server.baseURL, let url = URL(string: path, relativeTo: baseURL) else {
             throw PVEError.invalidServer
         }
@@ -173,14 +203,7 @@ public final class PVEClient {
         guard let http = response as? HTTPURLResponse else {
             throw PVEError.decoding("not an HTTP response")
         }
-        switch http.statusCode {
-        case 200..<300:
-            return (data, http)
-        case 401, 403:
-            throw PVEError.unauthorized
-        default:
-            throw PVEError.http(status: http.statusCode, body: PVEProtocol.errorMessage(from: data))
-        }
+        return (data, http)
     }
 
     private func applyAuthentication(to request: inout URLRequest, method: String) async throws {

@@ -4,6 +4,30 @@ import PVEClient
 
 let t = TestRunner()
 
+/// A holder so a value produced inside a `Task` can be asserted on once the test has
+/// waited for it.
+final class Box<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: Value
+    init(_ value: Value) { stored = value }
+    var value: Value {
+        get { lock.lock(); defer { lock.unlock() }; return stored }
+        set { lock.lock(); stored = newValue; lock.unlock() }
+    }
+}
+
+/// Waits for `@MainActor` work by draining the main run loop rather than blocking on
+/// it. `DispatchSemaphore.wait` on the main thread occupies the very executor the work
+/// is queued on, so the work never starts and the assertion that follows passes
+/// vacuously against an untouched value.
+func waitOnMain(_ timeout: TimeInterval = 20, until condition: () -> Bool) {
+    let deadline = Date().addingTimeInterval(timeout)
+    while condition() == false, Date() < deadline {
+        _ = RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01))
+    }
+}
+
+
 // MARK: - Server
 
 t.test("baseURL builds https://host:port") {
@@ -487,10 +511,15 @@ t.test("signIn(usingSecret:) never touches the secret provider") {
         var wasCalled: Bool { lock.lock(); defer { lock.unlock() }; return value }
     }
     let providerCalled = Flag()
-    var profile = PVEServerProfile(label: "Home", host: "127.0.0.1", port: 1)
+    // A host that cannot form a URL: the sign-in settles on .invalidServer without
+    // ever touching the network, which keeps the check deterministic and instant.
+    var profile = PVEServerProfile(label: "Home", host: "pve lan")
     profile.tokenID = "root@pam!spicemac"
     let id = profile.id
-    let done = DispatchSemaphore(value: 0)
+    let settled = Box<PVEInstanceState?>(nil)
+    // signIn's async half holds the coordinator weakly, so a local would be gone
+    // before the sign-in it started ever runs.
+    let live = Box<AnyObject?>(nil)
 
     Task { @MainActor in
         let coordinator = PVEFleetCoordinator(trustDelegate: nil) { _ in
@@ -500,12 +529,14 @@ t.test("signIn(usingSecret:) never touches the secret provider") {
         coordinator.setProfiles([profile])
         coordinator.onChange = { state in
             // Skip the transient .signingIn step; only the eventual outcome matters.
-            guard state.instance(id)?.state != .signingIn else { return }
-            done.signal()
+            guard let current = state.instance(id)?.state, current != .signingIn else { return }
+            settled.value = current
         }
+        live.value = coordinator
         coordinator.signIn(id, usingSecret: "typed-secret")
     }
-    _ = done.wait(timeout: .now() + 10)
+    waitOnMain { settled.value != nil }
+    t.expect(settled.value != nil, "the sign-in never settled")
     t.expect(providerCalled.wasCalled == false,
              "an explicit secret must bypass secretProvider entirely")
 }
@@ -540,6 +571,245 @@ t.test("prompts run one at a time even when requested concurrently") {
     }
     _ = done.wait(timeout: .now() + 10)
     t.expectEqual(tracker.peak, 1)
+}
+
+// MARK: - Connection identity
+
+t.test("connection identity ignores label and remember-secret") {
+    var a = PVEServerProfile(label: "Home", host: "pve.lan", tokenID: "root@pam!a")
+    var b = a
+    b.label = "Rack B"
+    b.rememberSecret = !a.rememberSecret
+    t.expect(a.connectsIdentically(to: b), "cosmetic fields must not invalidate a live client")
+    a.label = "x"
+    t.expect(b.connectsIdentically(to: a), "the comparison must be symmetric")
+}
+
+t.test("connection identity notices host, port, kind, token, username and realm") {
+    let base = PVEServerProfile(label: "Home", host: "pve.lan", port: 8006,
+                                tokenID: "root@pam!a", username: "root", realm: "pam")
+    var host = base;     host.host = "other.lan"
+    var port = base;     port.port = 443
+    var kind = base;     kind.authKind = .password
+    var token = base;    token.tokenID = "root@pam!b"
+    var user = base;     user.username = "admin"
+    var realm = base;    realm.realm = "pve"
+    for changed in [host, port, kind, token, user, realm] {
+        t.expect(base.connectsIdentically(to: changed) == false,
+                 "a changed connection field must invalidate the client")
+    }
+}
+
+// MARK: - Expired ticket retry
+
+t.test("a 401 with a cached password ticket is retried once") {
+    t.expect(PVEClient.shouldRetryAfterExpiredTicket(
+        status: 401,
+        credentials: .password(username: "root", realm: "pam", password: "pw"),
+        hasTicket: true), "an expired ticket is exactly what one retry fixes")
+}
+
+t.test("a 401 without a cached ticket is a bad password, not an expiry") {
+    t.expect(PVEClient.shouldRetryAfterExpiredTicket(
+        status: 401,
+        credentials: .password(username: "root", realm: "pam", password: "pw"),
+        hasTicket: false) == false, "retrying a fresh login loops on a wrong password")
+}
+
+t.test("a token 401 is never retried") {
+    t.expect(PVEClient.shouldRetryAfterExpiredTicket(
+        status: 401,
+        credentials: .apiToken(id: "root@pam!a", secret: "s"),
+        hasTicket: true) == false, "API tokens carry no session state to refresh")
+}
+
+t.test("a 403 is a permissions problem and is never retried") {
+    t.expect(PVEClient.shouldRetryAfterExpiredTicket(
+        status: 403,
+        credentials: .password(username: "root", realm: "pam", password: "pw"),
+        hasTicket: true) == false, "a permissions failure does not improve on a second try")
+}
+
+// MARK: - Serialised trust prompts
+
+t.test("the certificate dialog shares the prompt queue with keychain reads") {
+    final class Tracker: @unchecked Sendable {
+        private let lock = NSLock()
+        private var active = 0
+        private(set) var peak = 0
+        func enter() { lock.lock(); active += 1; peak = max(peak, active); lock.unlock() }
+        func leave() { lock.lock(); active -= 1; lock.unlock() }
+    }
+    final class BlockingTrust: PVETrustDelegate, @unchecked Sendable {
+        let tracker: Tracker
+        init(tracker: Tracker) { self.tracker = tracker }
+        func pinnedFingerprint(forHost host: String) -> String? { nil }
+        func pinCertificate(fingerprint: String, forHost host: String) {}
+        func shouldTrustCertificate(host: String, fingerprint: String, isChange: Bool) async -> Bool {
+            tracker.enter()
+            try? await Task.sleep(nanoseconds: 20_000_000)
+            tracker.leave()
+            return true
+        }
+    }
+
+    let tracker = Tracker()
+    let queue = PVEPromptQueue()
+    let delegate = PVEQueuedTrustDelegate(wrapping: BlockingTrust(tracker: tracker), prompts: queue)
+    let done = DispatchSemaphore(value: 0)
+
+    Task {
+        await withTaskGroup(of: Void.self) { group in
+            for index in 0..<4 {
+                group.addTask {
+                    _ = await delegate.shouldTrustCertificate(host: "node\(index)", fingerprint: "AA", isChange: false)
+                }
+                // A keychain read on the same queue must not overlap a dialog either.
+                group.addTask {
+                    await queue.run {
+                        tracker.enter()
+                        try? await Task.sleep(nanoseconds: 5_000_000)
+                        tracker.leave()
+                    }
+                }
+            }
+        }
+        done.signal()
+    }
+    _ = done.wait(timeout: .now() + 20)
+    t.expectEqual(tracker.peak, 1)
+}
+
+t.test("pinning and pin lookup pass through the queue wrapper unblocked") {
+    final class Recording: PVETrustDelegate, @unchecked Sendable {
+        var pinned: [String: String] = [:]
+        func pinnedFingerprint(forHost host: String) -> String? { pinned[host] }
+        func pinCertificate(fingerprint: String, forHost host: String) { pinned[host] = fingerprint }
+        func shouldTrustCertificate(host: String, fingerprint: String, isChange: Bool) async -> Bool { false }
+    }
+    let inner = Recording()
+    let delegate = PVEQueuedTrustDelegate(wrapping: inner, prompts: PVEPromptQueue())
+    t.expectNil(delegate.pinnedFingerprint(forHost: "pve.lan"))
+    delegate.pinCertificate(fingerprint: "AA:BB", forHost: "pve.lan")
+    t.expectEqual(delegate.pinnedFingerprint(forHost: "pve.lan"), "AA:BB")
+}
+
+// MARK: - Missing secrets
+
+t.test("no stored secret and no prompt reports the server, not rejected credentials") {
+    var profile = PVEServerProfile(label: "Home", host: "127.0.0.1", port: 1)
+    profile.tokenID = "root@pam!spicemac"
+    profile.rememberSecret = false
+    let id = profile.id
+    let box = Box<PVEInstanceState?>(nil)
+    let live = Box<AnyObject?>(nil)
+
+    Task { @MainActor in
+        let coordinator = PVEFleetCoordinator(trustDelegate: nil, secretProvider: { _ in nil })
+        coordinator.setProfiles([profile])
+        coordinator.onChange = { state in
+            guard let current = state.instance(id)?.state, current != .signingIn else { return }
+            box.value = current
+        }
+        live.value = coordinator
+        coordinator.signIn(id)
+    }
+    waitOnMain { box.value != nil }
+    t.expectEqual(box.value, .failed(.secretUnavailable(server: "Home")))
+}
+
+t.test("a server with no stored secret is offered to the prompt instead of failing") {
+    var profile = PVEServerProfile(label: "Home", host: "127.0.0.1", port: 1)
+    profile.tokenID = "root@pam!spicemac"
+    profile.rememberSecret = false
+    let id = profile.id
+    let asked = Box<Bool>(false)
+    let live = Box<AnyObject?>(nil)
+
+    Task { @MainActor in
+        let coordinator = PVEFleetCoordinator(trustDelegate: nil,
+                                              secretProvider: { _ in nil },
+                                              secretPrompt: { _ in asked.value = true; return "typed" })
+        coordinator.setProfiles([profile])
+        live.value = coordinator
+        coordinator.signIn(id)
+    }
+    waitOnMain { asked.value }
+    t.expect(asked.value, "the prompt must be the fallback when nothing is stored")
+}
+
+t.test("a stored secret is used without troubling the prompt") {
+    // Unusable as a URL on purpose — the sign-in settles on .invalidServer rather than
+    // waiting on a socket, and the secret decision has already been made by then.
+    var profile = PVEServerProfile(label: "Home", host: "pve lan")
+    profile.tokenID = "root@pam!spicemac"
+    let id = profile.id
+    let asked = Box<Bool>(false)
+    let settled = Box<PVEInstanceState?>(nil)
+    let live = Box<AnyObject?>(nil)
+
+    Task { @MainActor in
+        let coordinator = PVEFleetCoordinator(trustDelegate: nil,
+                                              secretProvider: { _ in "stored" },
+                                              secretPrompt: { _ in asked.value = true; return "typed" })
+        coordinator.setProfiles([profile])
+        coordinator.onChange = { state in
+            guard let current = state.instance(id)?.state, current != .signingIn else { return }
+            settled.value = current
+        }
+        live.value = coordinator
+        coordinator.signIn(id)
+    }
+    waitOnMain { settled.value != nil }
+    t.expect(settled.value != nil, "the sign-in never settled")
+    t.expect(asked.value == false, "a stored secret must not raise a dialog")
+}
+
+// MARK: - Editing a signed-in profile
+
+t.test("editing where a signed-in server points signs it out") {
+    var profile = PVEServerProfile(label: "Home", host: "127.0.0.1", port: 1)
+    profile.tokenID = "root@pam!spicemac"
+    let id = profile.id
+    let box = Box<PVEInstanceState?>(nil)
+    let host = Box<String?>(nil)
+    let hasClient = Box<Bool?>(nil)
+
+    Task { @MainActor in
+        let coordinator = PVEFleetCoordinator(trustDelegate: nil, secretProvider: { _ in "s" })
+        coordinator.setProfiles([profile])
+        var moved = profile
+        moved.host = "192.0.2.1"
+        coordinator.setProfiles([moved])
+        host.value = coordinator.state.instance(id)?.profile.host
+        hasClient.value = coordinator.client(for: id) != nil
+        box.value = coordinator.state.instance(id)?.state
+    }
+    waitOnMain { box.value != nil }
+    t.expectEqual(box.value, .signedOut)
+    t.expectEqual(host.value, "192.0.2.1")
+    t.expectEqual(hasClient.value, false)
+}
+
+t.test("a cosmetic edit leaves a signed-in server alone") {
+    var profile = PVEServerProfile(label: "Home", host: "127.0.0.1", port: 1)
+    profile.tokenID = "root@pam!spicemac"
+    let id = profile.id
+    let label = Box<String?>(nil)
+    let state = Box<PVEInstanceState?>(nil)
+
+    Task { @MainActor in
+        let coordinator = PVEFleetCoordinator(trustDelegate: nil, secretProvider: { _ in "s" })
+        coordinator.setProfiles([profile])
+        var renamed = profile
+        renamed.label = "Rack B"
+        coordinator.setProfiles([renamed])
+        state.value = coordinator.state.instance(id)?.state
+        label.value = coordinator.state.instance(id)?.profile.label
+    }
+    waitOnMain { label.value != nil }
+    t.expectEqual(label.value, "Rack B")
+    t.expectEqual(state.value, .signedOut)
 }
 
 t.finishAndExit()

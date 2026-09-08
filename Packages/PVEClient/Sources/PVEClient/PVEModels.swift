@@ -86,6 +86,9 @@ public enum PVEError: Error, Equatable, CustomStringConvertible {
     case malformedTokenID(String)
     case http(status: Int, body: String)
     case unauthorized
+    /// No secret could be obtained for a server — nothing stored, and either nothing
+    /// asked the user for one or they declined.
+    case secretUnavailable(server: String)
     case decoding(String)
     case notSpiceConfig(String)
     case spiceUnavailable(guest: String, reason: String)
@@ -107,6 +110,12 @@ public enum PVEError: Error, Equatable, CustomStringConvertible {
                                   : "Proxmox returned HTTP \(status): \(detail)"
         case .unauthorized:
             return "Proxmox rejected the credentials. Check the token ID and secret, or the username, realm and password."
+        case .secretUnavailable(let server):
+            return """
+                No secret is stored for \(server), and none was entered. \
+                Turn on “Remember in Keychain” for it in Manage Servers, or enter the \
+                secret when asked.
+                """
         case .decoding(let what):
             return "Could not read the Proxmox response: \(what)"
         case .notSpiceConfig(let head):

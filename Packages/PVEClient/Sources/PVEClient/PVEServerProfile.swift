@@ -55,6 +55,17 @@ public struct PVEServerProfile: Codable, Equatable, Identifiable, Sendable {
         return "\(host):\(port)|\(user)"
     }
 
+    /// Whether a live client built from `other` would reach the same place as the same
+    /// user. The secret is not part of this: it is not carried on the profile, and a
+    /// still-valid one keeps working.
+    public func connectsIdentically(to other: PVEServerProfile) -> Bool {
+        server == other.server
+            && authKind == other.authKind
+            && tokenID == other.tokenID
+            && username == other.username
+            && realm == other.realm
+    }
+
     public var isComplete: Bool {
         guard host.trimmingCharacters(in: .whitespaces).isEmpty == false else { return false }
         switch authKind {
