@@ -185,7 +185,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         let controller = manageServersController ?? {
             let controller = PVEManageServersController()
             controller.onProfilesChanged = { [weak self] profiles in
-                self?.proxmoxBrowser.setProfiles(profiles)
+                // Never through `proxmoxBrowser`: building the browser reads the
+                // Keychain, and a browser that does not exist has nothing to update.
+                self?.createdBrowser?.setProfiles(profiles)
             }
             manageServersController = controller
             return controller

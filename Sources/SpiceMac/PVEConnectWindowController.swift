@@ -105,6 +105,9 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
     /// The secret as loaded from the Keychain. Rewriting an unchanged secret costs a
     /// second authorization prompt for no benefit, so persist only real changes.
     private var loadedSecret: String?
+    /// The stored profile the fields were last populated from, so a fleet change can
+    /// be told apart from one this form already reflects.
+    private var formProfile: PVEServerProfile?
     /// The profile the credentials form above edits — always the fleet's first slot.
     /// Everything else in the window (the tree, sign-in-all-on-reveal) is driven by
     /// the coordinator across every configured server, not just this one.
@@ -138,8 +141,10 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
     // MARK: - Lifecycle
 
     init() {
-        coordinator = PVEFleetCoordinator(trustDelegate: PVEProfileStore.shared,
-                                          secretProvider: { PVEProfileStore.shared.secret(for: $0) })
+        coordinator = PVEFleetCoordinator(
+            trustDelegate: PVEProfileStore.shared,
+            secretProvider: { PVEProfileStore.shared.secret(for: $0) },
+            secretPrompt: { profile in await MainActor.run { PVESecretPrompt.ask(for: profile) } })
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 580),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable],
                               backing: .buffered,
@@ -171,6 +176,10 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
     /// Forwarded from the Manage Servers sheet.
     func setProfiles(_ profiles: [PVEServerProfile]) {
         coordinator.setProfiles(profiles)
+        // The credentials form is a view onto the fleet's first slot. If the sheet
+        // changed that slot, the fields — and `loadedSecret` — still hold pre-sheet
+        // values, and the next Sign In would write them straight back over the edit.
+        if profiles.first != formProfile { loadProfile() }
         primaryProfileID = profiles.first?.id
     }
 
@@ -413,8 +422,10 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
     // MARK: - Profile
 
     private func loadProfile() {
-        let profile = PVEProfileStore.shared.profiles.first ?? PVEServerProfile()
-        primaryProfileID = PVEProfileStore.shared.profiles.first?.id
+        formProfile = PVEProfileStore.shared.profiles.first
+        let profile = formProfile ?? PVEServerProfile()
+        primaryProfileID = formProfile?.id
+        loadedSecret = nil
         hostField.stringValue = profile.host
         portField.stringValue = String(profile.port)
         tokenIDField.stringValue = profile.tokenID
@@ -550,15 +561,36 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
     }
 
     private func persist(profile: PVEServerProfile, secret: String) {
-        PVEProfileStore.shared.profiles = updatedProfiles(with: profile)
+        let previous = PVEProfileStore.shared.profiles.first
+        let updated = updatedProfiles(with: profile)
+        PVEProfileStore.shared.profiles = updated
+        formProfile = updated.first
+
+        // Editing the host, port or token moves the Keychain account and the pinned
+        // certificate along with it. Left behind, the old item is an orphan nothing can
+        // reach, and the old pin keeps a host we no longer use auto-trusted.
+        var accountMoved = false
+        if let previous, previous.id == profile.id {
+            accountMoved = previous.keychainAccount != profile.keychainAccount
+            if accountMoved,
+               updated.contains(where: { $0.keychainAccount == previous.keychainAccount }) == false {
+                PVEKeychain.delete(account: previous.keychainAccount)
+            }
+            if previous.host.isEmpty == false,
+               previous.host.caseInsensitiveCompare(profile.host) != .orderedSame,
+               updated.contains(where: { $0.host.caseInsensitiveCompare(previous.host) == .orderedSame }) == false {
+                PVEProfileStore.shared.forgetPin(forHost: previous.host)
+            }
+        }
 
         guard profile.rememberSecret else {
             PVEKeychain.delete(account: profile.keychainAccount)
             loadedSecret = nil
             return
         }
-        // Rewriting an unchanged secret costs a second Keychain authorization prompt.
-        guard secret != loadedSecret else { return }
+        // Rewriting an unchanged secret costs a second Keychain authorization prompt —
+        // but a moved account has nothing stored under its new name yet.
+        guard accountMoved || secret != loadedSecret else { return }
         PVEProfileStore.shared.setSecret(secret, for: profile)
         loadedSecret = secret
     }
@@ -671,6 +703,12 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
             guard let self, let hint = await client.diagnoseEmptyGuestList() else { return }
             self.emptyListHints[instance.id] = hint
             if let row = self.instanceRowCache[instance.id] {
+                // reloadItem does not re-query heightOfRowByItem, so the row would stay
+                // 22pt tall and clip the two-line stack the hint is rendered into.
+                let index = self.outlineView.row(forItem: row)
+                if index >= 0 {
+                    self.outlineView.noteHeightOfRows(withIndexesChanged: IndexSet(integer: index))
+                }
                 self.outlineView.reloadItem(row)
             }
         }

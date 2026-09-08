@@ -44,6 +44,15 @@ final class PVEManageServersController: NSObject, NSWindowDelegate, NSTableViewD
     /// from this is worth a write — rewriting an identical secret costs a second
     /// Keychain authorization prompt for no benefit.
     private var loadedSecrets: [UUID: String] = [:]
+    /// Rows whose secret has actually been read. Reading is deferred to the moment a
+    /// row is selected: with an ad-hoc signed build every read is its own system
+    /// authorization dialog, and reading the whole fleet up front is N of them before
+    /// the sheet even draws, none of them queued or labelled.
+    private var secretsLoadedFor: Set<UUID> = []
+    /// Each profile exactly as the sheet opened it. Editing the host, port or token ID
+    /// moves the Keychain account and the certificate pin, so both have to be located
+    /// and migrated from what the profile *was*, not from what the fields now say.
+    private var originalProfiles: [UUID: PVEServerProfile] = [:]
     /// Profiles removed from `profiles` during this sheet session. Their Keychain
     /// items are only deleted on Done — never on Cancel, and never for a profile that
     /// merely had its remember-secret toggle flipped.
@@ -68,10 +77,10 @@ final class PVEManageServersController: NSObject, NSWindowDelegate, NSTableViewD
         profiles = PVEProfileStore.shared.profiles
         removedProfiles = []
         loadedSecrets = [:]
-        for profile in profiles {
-            loadedSecrets[profile.id] = PVEProfileStore.shared.secret(for: profile)
-        }
-        editedSecrets = loadedSecrets
+        editedSecrets = [:]
+        secretsLoadedFor = []
+        originalProfiles = [:]
+        for profile in profiles { originalProfiles[profile.id] = profile }
 
         tableView.reloadData()
         selectRow(profiles.isEmpty ? nil : 0)
@@ -266,6 +275,7 @@ final class PVEManageServersController: NSObject, NSWindowDelegate, NSTableViewD
         }
         setFieldsEnabled(true)
         let profile = profiles[index]
+        loadSecretIfNeeded(profile.id)
         labelField.stringValue = profile.label
         hostField.stringValue = profile.host
         portField.stringValue = String(profile.port)
@@ -278,6 +288,18 @@ final class PVEManageServersController: NSObject, NSWindowDelegate, NSTableViewD
         tokenSecretField.stringValue = profile.authKind == .apiToken ? secret : ""
         passwordField.stringValue = profile.authKind == .password ? secret : ""
         authKindChanged()
+    }
+
+    /// Reads one row's stored secret, once. Looked up under the account the profile had
+    /// when the sheet opened, so an unsaved edit to the host or token ID cannot send the
+    /// lookup somewhere else. A row added in this session has nothing to read.
+    private func loadSecretIfNeeded(_ id: UUID) {
+        guard secretsLoadedFor.contains(id) == false else { return }
+        secretsLoadedFor.insert(id)
+        guard let original = originalProfiles[id] else { return }
+        let stored = PVEProfileStore.shared.secret(for: original)
+        loadedSecrets[id] = stored
+        editedSecrets[id] = stored ?? ""
     }
 
     private func setFieldsEnabled(_ enabled: Bool) {
@@ -331,26 +353,72 @@ final class PVEManageServersController: NSObject, NSWindowDelegate, NSTableViewD
         selectRow(next)
     }
 
+    /// An Add nobody typed into. Stored, it becomes a permanent tree row that `signIn`
+    /// refuses and that does nothing but take up space. Anything actually entered —
+    /// even a lone host, or just the secret — makes the row differ from the blank
+    /// template and keeps it, so a half-finished real server is never discarded.
+    private func isUntouchedNewServer(_ profile: PVEServerProfile) -> Bool {
+        var blank = PVEServerProfile()
+        blank.id = profile.id
+        return profile == blank && (editedSecrets[profile.id] ?? "").isEmpty
+    }
+
     @objc private func done(_ sender: Any?) {
         captureFieldsIntoSelection()
 
-        for profile in profiles {
-            let loaded = loadedSecrets[profile.id]
-            let current = editedSecrets[profile.id] ?? ""
-            if profile.rememberSecret {
-                guard current != (loaded ?? "") else { continue }
-                PVEProfileStore.shared.setSecret(current, for: profile)
-            } else if loaded != nil {
-                PVEProfileStore.shared.setSecret("", for: profile)
+        let saved = profiles.filter { isUntouchedNewServer($0) == false }
+        let discarded = profiles.filter { isUntouchedNewServer($0) }
+        // What the fleet still claims after the edit. Every delete below is checked
+        // against these: removing a server and re-adding the same credentials in one
+        // session must not delete the item that re-add just earned.
+        let survivingAccounts = Set(saved.map(\.keychainAccount))
+        let survivingHosts = Set(saved.map { $0.host.lowercased() })
+
+        // Deletions run before any write, so an account or host that leaves and comes
+        // back in the same session ends up written rather than written-then-deleted.
+        for gone in removedProfiles + discarded {
+            if survivingAccounts.contains(gone.keychainAccount) == false {
+                PVEKeychain.delete(account: gone.keychainAccount)
+            }
+            if gone.host.isEmpty == false, survivingHosts.contains(gone.host.lowercased()) == false {
+                PVEProfileStore.shared.forgetPin(forHost: gone.host)
             }
         }
-        for removed in removedProfiles {
-            PVEKeychain.delete(account: removed.keychainAccount)
-        }
-        removedProfiles = []
 
-        PVEProfileStore.shared.profiles = profiles
-        onProfilesChanged?(profiles)
+        for profile in saved {
+            let original = originalProfiles[profile.id]
+            // An untouched row cannot have moved its account, changed its secret or
+            // flipped its toggle, so it needs no Keychain traffic at all.
+            if let original, original == profile, secretsLoadedFor.contains(profile.id) == false { continue }
+
+            let accountMoved = original != nil && original?.keychainAccount != profile.keychainAccount
+            if let previousAccount = original?.keychainAccount, accountMoved,
+               survivingAccounts.contains(previousAccount) == false {
+                PVEKeychain.delete(account: previousAccount)
+            }
+            if let previousHost = original?.host, previousHost.isEmpty == false,
+               previousHost.caseInsensitiveCompare(profile.host) != .orderedSame,
+               survivingHosts.contains(previousHost.lowercased()) == false {
+                PVEProfileStore.shared.forgetPin(forHost: previousHost)
+            }
+
+            guard profile.rememberSecret else {
+                PVEKeychain.delete(account: profile.keychainAccount)
+                continue
+            }
+            let current = editedSecrets[profile.id] ?? ""
+            // Rewriting an identical secret costs a second Keychain authorization
+            // prompt — but a moved account has nothing stored under its new name yet,
+            // so it must be written even when the text has not changed.
+            guard accountMoved || current != (loadedSecrets[profile.id] ?? "") else { continue }
+            PVEProfileStore.shared.setSecret(current, for: profile)
+        }
+
+        removedProfiles = []
+        profiles = saved
+
+        PVEProfileStore.shared.profiles = saved
+        onProfilesChanged?(saved)
 
         dismiss()
     }
