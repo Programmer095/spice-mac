@@ -14,11 +14,14 @@ final class PVEManageServersController: NSObject, NSWindowDelegate, NSTableViewD
     private let tableView = NSTableView()
     private let addButton = NSButton(title: "Add", target: nil, action: nil)
     private let removeButton = NSButton(title: "Remove", target: nil, action: nil)
+    private let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
     private let doneButton = NSButton(title: "Done", target: nil, action: nil)
 
     // Same field construction as PVEConnectWindowController.buildUI(): same
     // placeholders, same realm popup, same Remember in Keychain checkbox, so the two
-    // surfaces cannot validate a profile differently.
+    // surfaces cannot validate a profile differently. The label field has no
+    // counterpart there — the connect window only ever edits a single unlabeled slot.
+    private let labelField = NSTextField()
     private let hostField = NSTextField()
     private let portField = NSTextField()
     private let authSelector = NSSegmentedControl(labels: ["API Token", "Username & Password"],
@@ -41,6 +44,10 @@ final class PVEManageServersController: NSObject, NSWindowDelegate, NSTableViewD
     /// from this is worth a write — rewriting an identical secret costs a second
     /// Keychain authorization prompt for no benefit.
     private var loadedSecrets: [UUID: String] = [:]
+    /// Profiles removed from `profiles` during this sheet session. Their Keychain
+    /// items are only deleted on Done — never on Cancel, and never for a profile that
+    /// merely had its remember-secret toggle flipped.
+    private var removedProfiles: [PVEServerProfile] = []
     private var selectedIndex: Int?
 
     // MARK: - Lifecycle
@@ -59,6 +66,7 @@ final class PVEManageServersController: NSObject, NSWindowDelegate, NSTableViewD
 
     func present(over parent: NSWindow?) {
         profiles = PVEProfileStore.shared.profiles
+        removedProfiles = []
         loadedSecrets = [:]
         for profile in profiles {
             loadedSecrets[profile.id] = PVEProfileStore.shared.secret(for: profile)
@@ -80,11 +88,12 @@ final class PVEManageServersController: NSObject, NSWindowDelegate, NSTableViewD
     // MARK: - Building
 
     private func buildUI() {
-        for field in [hostField, portField, tokenIDField, usernameField] {
+        for field in [labelField, hostField, portField, tokenIDField, usernameField] {
             field.isEditable = true
             field.isBordered = true
             field.bezelStyle = .roundedBezel
         }
+        labelField.placeholderString = "Nickname (e.g. Home, Rack B)"
         hostField.placeholderString = "proxmox.example.com"
         portField.placeholderString = "8006"
         portField.formatter = onlyDigitsFormatter()
@@ -101,6 +110,7 @@ final class PVEManageServersController: NSObject, NSWindowDelegate, NSTableViewD
         rememberCheckbox.state = .on
 
         let grid = NSGridView(views: [
+            [NSTextField(labelWithString: "Label:"), labelField],
             [NSTextField(labelWithString: "Server:"), hostField,
              NSTextField(labelWithString: "Port:"), portField],
             [NSTextField(labelWithString: "Sign in with:"), authSelector],
@@ -114,17 +124,18 @@ final class PVEManageServersController: NSObject, NSWindowDelegate, NSTableViewD
         grid.column(at: 0).xPlacement = .trailing
         grid.rowSpacing = 8
         grid.columnSpacing = 8
-        for field in [hostField, tokenIDField, tokenSecretField, usernameField, passwordField] {
+        for field in [labelField, hostField, tokenIDField, tokenSecretField, usernameField, passwordField] {
             field.setContentHuggingPriority(.defaultLow, for: .horizontal)
             field.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
         }
         hostField.widthAnchor.constraint(greaterThanOrEqualToConstant: 220).isActive = true
-        grid.mergeCells(inHorizontalRange: NSRange(location: 1, length: 3), verticalRange: NSRange(location: 1, length: 1))
+        grid.mergeCells(inHorizontalRange: NSRange(location: 1, length: 3), verticalRange: NSRange(location: 0, length: 1))
         grid.mergeCells(inHorizontalRange: NSRange(location: 1, length: 3), verticalRange: NSRange(location: 2, length: 1))
         grid.mergeCells(inHorizontalRange: NSRange(location: 1, length: 3), verticalRange: NSRange(location: 3, length: 1))
-        grid.mergeCells(inHorizontalRange: NSRange(location: 1, length: 3), verticalRange: NSRange(location: 5, length: 1))
-        tokenRows = [grid.row(at: 2), grid.row(at: 3)]
-        passwordRows = [grid.row(at: 4), grid.row(at: 5)]
+        grid.mergeCells(inHorizontalRange: NSRange(location: 1, length: 3), verticalRange: NSRange(location: 4, length: 1))
+        grid.mergeCells(inHorizontalRange: NSRange(location: 1, length: 3), verticalRange: NSRange(location: 6, length: 1))
+        tokenRows = [grid.row(at: 3), grid.row(at: 4)]
+        passwordRows = [grid.row(at: 5), grid.row(at: 6)]
 
         configureTable()
         let scrollView = NSScrollView()
@@ -151,13 +162,19 @@ final class PVEManageServersController: NSObject, NSWindowDelegate, NSTableViewD
         scrollView.widthAnchor.constraint(equalToConstant: 200).isActive = true
         scrollView.heightAnchor.constraint(greaterThanOrEqualToConstant: 260).isActive = true
 
+        cancelButton.target = self
+        cancelButton.action = #selector(cancel(_:))
+        cancelButton.keyEquivalent = "\u{1b}"
+        cancelButton.bezelStyle = .rounded
+
         doneButton.target = self
         doneButton.action = #selector(done(_:))
         doneButton.keyEquivalent = "\r"
         doneButton.bezelStyle = .rounded
 
-        let footer = NSStackView(views: [NSView(), doneButton])
+        let footer = NSStackView(views: [NSView(), cancelButton, doneButton])
         footer.orientation = .horizontal
+        footer.spacing = 8
 
         let form = NSStackView(views: [grid, NSView()])
         form.orientation = .vertical
@@ -218,6 +235,7 @@ final class PVEManageServersController: NSObject, NSWindowDelegate, NSTableViewD
     private func captureFieldsIntoSelection() {
         guard let index = selectedIndex, profiles.indices.contains(index) else { return }
         var profile = profiles[index]
+        profile.label = labelField.stringValue.trimmingCharacters(in: .whitespaces)
         profile.host = hostField.stringValue.trimmingCharacters(in: .whitespaces)
         profile.port = Int(portField.stringValue) ?? 8006
         profile.authKind = authSelector.selectedSegment == 0 ? .apiToken : .password
@@ -232,6 +250,7 @@ final class PVEManageServersController: NSObject, NSWindowDelegate, NSTableViewD
 
     private func loadSelectionIntoFields() {
         guard let index = selectedIndex, profiles.indices.contains(index) else {
+            labelField.stringValue = ""
             hostField.stringValue = ""
             portField.stringValue = ""
             tokenIDField.stringValue = ""
@@ -247,6 +266,7 @@ final class PVEManageServersController: NSObject, NSWindowDelegate, NSTableViewD
         }
         setFieldsEnabled(true)
         let profile = profiles[index]
+        labelField.stringValue = profile.label
         hostField.stringValue = profile.host
         portField.stringValue = String(profile.port)
         tokenIDField.stringValue = profile.tokenID
@@ -261,7 +281,7 @@ final class PVEManageServersController: NSObject, NSWindowDelegate, NSTableViewD
     }
 
     private func setFieldsEnabled(_ enabled: Bool) {
-        for field in [hostField, portField, tokenIDField, tokenSecretField,
+        for field in [labelField, hostField, portField, tokenIDField, tokenSecretField,
                       usernameField, passwordField] as [NSControl] {
             field.isEnabled = enabled
         }
@@ -303,6 +323,7 @@ final class PVEManageServersController: NSObject, NSWindowDelegate, NSTableViewD
     @objc private func removeServer(_ sender: Any?) {
         guard let index = selectedIndex, profiles.indices.contains(index) else { return }
         let removed = profiles.remove(at: index)
+        removedProfiles.append(removed)
         editedSecrets.removeValue(forKey: removed.id)
         tableView.reloadData()
         let next = profiles.isEmpty ? nil : min(index, profiles.count - 1)
@@ -323,9 +344,25 @@ final class PVEManageServersController: NSObject, NSWindowDelegate, NSTableViewD
                 PVEProfileStore.shared.setSecret("", for: profile)
             }
         }
+        for removed in removedProfiles {
+            PVEKeychain.delete(account: removed.keychainAccount)
+        }
+        removedProfiles = []
+
         PVEProfileStore.shared.profiles = profiles
         onProfilesChanged?(profiles)
 
+        dismiss()
+    }
+
+    /// Discards whatever is on screen and in `profiles`/`removedProfiles` — no write to
+    /// `PVEProfileStore` and no Keychain access, so an accidental Add or a mistyped
+    /// edit costs nothing.
+    @objc private func cancel(_ sender: Any?) {
+        dismiss()
+    }
+
+    private func dismiss() {
         if let parent = window.sheetParent {
             parent.endSheet(window)
         } else {

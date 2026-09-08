@@ -190,7 +190,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             manageServersController = controller
             return controller
         }()
-        controller.present(over: proxmoxBrowser.window)
+        controller.present(over: createdBrowser?.window)
     }
 
     /// Reached from the browser's own button, so the `.vv` route stays discoverable
