@@ -370,4 +370,38 @@ t.test("profiles round-trip through Codable so they can be persisted") {
     t.expectEqual(back, p)
 }
 
+// MARK: - Migration
+
+let legacyProfileJSON = """
+{"host":"10.168.1.249","port":8006,"authKind":"apiToken",
+ "tokenID":"root@pam!spicemac","username":"root","realm":"pam","rememberSecret":true}
+"""
+
+t.test("a legacy profile migrates to a one-element fleet") {
+    let profiles = PVEServerProfile.migratingLegacy(Data(legacyProfileJSON.utf8))
+    t.expectEqual(profiles.count, 1)
+    t.expectEqual(profiles.first?.host, "10.168.1.249")
+    t.expectEqual(profiles.first?.tokenID, "root@pam!spicemac")
+}
+
+t.test("migration preserves the keychain account so no secret is re-entered") {
+    let migrated = try t.unwrap(PVEServerProfile.migratingLegacy(Data(legacyProfileJSON.utf8)).first)
+    t.expectEqual(migrated.keychainAccount, "10.168.1.249:8006|root@pam!spicemac")
+}
+
+t.test("a migrated profile is labelled by its host, having had no label before") {
+    let migrated = try t.unwrap(PVEServerProfile.migratingLegacy(Data(legacyProfileJSON.utf8)).first)
+    t.expectEqual(migrated.displayName, "10.168.1.249")
+}
+
+t.test("no legacy profile migrates to an empty fleet, not a broken one") {
+    t.expectEqual(PVEServerProfile.migratingLegacy(nil).count, 0)
+    t.expectEqual(PVEServerProfile.migratingLegacy(Data("not json".utf8)).count, 0)
+}
+
+t.test("an incomplete legacy profile is dropped rather than carried forward broken") {
+    let partial = Data(#"{"host":"","port":8006,"authKind":"apiToken","tokenID":""}"#.utf8)
+    t.expectEqual(PVEServerProfile.migratingLegacy(partial).count, 0)
+}
+
 t.finishAndExit()

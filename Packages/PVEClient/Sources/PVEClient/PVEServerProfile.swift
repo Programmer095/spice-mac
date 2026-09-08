@@ -70,3 +70,34 @@ public struct PVEServerProfile: Codable, Equatable, Identifiable, Sendable {
         }
     }
 }
+
+extension PVEServerProfile {
+    /// Decode the pre-fleet single-profile record into a one-element fleet.
+    ///
+    /// The legacy record had no `id` or `label`, and its keychain account was derived
+    /// from host/port/user exactly as `keychainAccount` still does — so a migrated
+    /// profile finds the existing secret without the user re-entering it.
+    public static func migratingLegacy(_ data: Data?) -> [PVEServerProfile] {
+        struct Legacy: Decodable {
+            let host: String?
+            let port: Int?
+            let authKind: AuthKind?
+            let tokenID: String?
+            let username: String?
+            let realm: String?
+            let rememberSecret: Bool?
+        }
+        guard let data, let old = try? JSONDecoder().decode(Legacy.self, from: data) else {
+            return []
+        }
+        let profile = PVEServerProfile(label: "",
+                                       host: old.host ?? "",
+                                       port: old.port ?? 8006,
+                                       authKind: old.authKind ?? .apiToken,
+                                       tokenID: old.tokenID ?? "",
+                                       username: old.username ?? "root",
+                                       realm: old.realm ?? "pam",
+                                       rememberSecret: old.rememberSecret ?? true)
+        return profile.isComplete ? [profile] : []
+    }
+}
