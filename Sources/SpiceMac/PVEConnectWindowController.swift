@@ -426,6 +426,10 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
         let profile = formProfile ?? PVEServerProfile()
         primaryProfileID = formProfile?.id
         loadedSecret = nil
+        // Cleared unconditionally: reloading onto a server with nothing stored would
+        // otherwise leave the previous server's secret sitting in the field.
+        tokenSecretField.stringValue = ""
+        passwordField.stringValue = ""
         hostField.stringValue = profile.host
         portField.stringValue = String(profile.port)
         tokenIDField.stringValue = profile.tokenID

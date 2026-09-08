@@ -81,6 +81,9 @@ final class PVEManageServersController: NSObject, NSWindowDelegate, NSTableViewD
         secretsLoadedFor = []
         originalProfiles = [:]
         for profile in profiles { originalProfiles[profile.id] = profile }
+        // The fields still show the last session's row; without this the first
+        // selectRow banks them into whatever profile now sits at that index.
+        selectedIndex = nil
 
         tableView.reloadData()
         selectRow(profiles.isEmpty ? nil : 0)
