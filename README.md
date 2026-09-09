@@ -289,6 +289,41 @@ SpiceMac follows the resulting Proxmox task to completion and then re-reads the
 guest list, so the status column reflects what actually happened rather than what
 was requested.
 
+### Inside a console: the guest picker and the action bar
+
+Two panels ride over a console, both hidden until you ask for them.
+
+**Show Guests** (⌘L) slides a picker in from the left: every guest across every
+signed-in server, filterable by name, VMID, node or server, so switching machines
+does not mean going back to the connect tab. It closes as soon as you pick one.
+Stopped guests are listed but not selectable — there is no console to open, and
+starting one is a management action that belongs in the tab. Hovering the very
+left edge of the window reveals it too, but that target is deliberately tiny; the
+menu command is the route meant to carry the load.
+
+**Show Guest Actions** (⇧⌘L) puts a strip at the top with power actions and the
+CD-ROM for the guest you are looking at.
+
+The connect tab remains where a fleet is *set up* — credentials, adding and
+editing servers, the whole tree. The picker is only the selection step.
+
+#### ISO images need two privileges `PVEVMUser` does not give you
+
+Attaching an ISO needs **`VM.Config.CDROM`**, and **listing** the available images
+needs **`Datastore.Audit`** on the storages. Neither is part of `PVEVMUser`.
+
+Both fail quietly rather than loudly, which is why SpiceMac checks up front
+instead of letting the action 403:
+
+- Without `VM.Config.CDROM` the CD-ROM control is disabled and says so. Sign-in,
+  the guest list and the console all work perfectly, so nothing else hints at it.
+- Without `Datastore.Audit` Proxmox returns an **empty storage list rather than a
+  403**, exactly as it does for the guest list. SpiceMac reports "No storage
+  visible" and names the privilege, because "no ISO images found" would send you
+  hunting for missing files instead of a missing grant.
+
+Grant them on `/`, `/vms` (or `/vms/<vmid>`) and `/storage` respectively.
+
 ### Or open a `.vv` file
 
 The file route is still there, it is just no longer what the app opens with — reach

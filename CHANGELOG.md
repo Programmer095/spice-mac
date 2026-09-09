@@ -8,6 +8,23 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A guest picker inside consoles (File ▸ Show Guests, ⌘L).** Switching machines
+  no longer means going back to the connect tab: a panel slides in from the left
+  with every guest across every signed-in server, filterable by name, VMID, node
+  or server, and closes as soon as one is picked. Stopped guests are listed but
+  not selectable — there is no console to open, and starting one belongs in the
+  tab. Hovering the very left edge reveals it too, but that target is four points
+  wide on purpose; over a live guest, a broader one would fire while working.
+  The connect tab stays the place a fleet is set up.
+- **A per-guest action bar (File ▸ Show Guest Actions, ⇧⌘L).** Power actions and
+  the CD-ROM for the guest in the current console, in a strip at the top.
+- **ISO attach and eject**, with the two privileges checked before the controls
+  are offered. Neither `VM.Config.CDROM` (attaching) nor `Datastore.Audit`
+  (listing images) is part of `PVEVMUser`, and both fail quietly: without the
+  former, everything else works right up to the write; without the latter Proxmox
+  returns an *empty storage list rather than a 403*, so "no images found" would be
+  a lie. SpiceMac disables the control and names the missing privilege instead.
+
 - **Connect to Proxmox natively (File ▸ Connect to Proxmox…, ⌘N).** Sign in to a
   node with an API token (or username/password) and pick a VM from a searchable
   list — no more downloading a `.vv` from the web UI for every connection. The
@@ -86,6 +103,31 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   has somewhere obvious to type; every other server is edited in the sheet.
 
 ### Fixed
+
+- **The connect panel no longer collapses to a sliver on sign-in.** Hiding the
+  credentials rows left the grid with no width, and its required width tie dragged
+  the whole panel down with it — filter field and guest tree included. It only
+  showed once a console had grown the tab group, which made it look like a width
+  problem it was not.
+
+- **A blocked network fails in seconds instead of three silent minutes.** An
+  unreachable path was parked for the full resource timeout and then reported as
+  "Timed out". The wait for a network path is now bounded separately from the wait
+  at the certificate prompt — the one that legitimately involves a person — so a
+  path that is not coming gives up quickly and names the host.
+
+- **A failed sign-in no longer caches its client**, so Refresh asks for
+  credentials again rather than retrying the ones just rejected.
+
+- **Two automatic sign-ins for the same server no longer race**, each minting a
+  client. A deliberate Sign In still always goes through.
+
+- **Proxmox errors read properly wherever they surface.** `PVEError` did not
+  conform to `LocalizedError`, so any presenter using `localizedDescription`
+  showed Foundation's generic "The operation couldn't be completed."
+
+- **A removed server's empty-list diagnosis is discarded** rather than kept and
+  rendered against whatever later took its id.
 
 - **Password sign-ins no longer break after about two hours.** The cached login
   ticket was never re-minted, so once it expired every refresh reported a

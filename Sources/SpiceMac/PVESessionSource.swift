@@ -9,7 +9,9 @@ import PVEClient
 /// asking the API for a new one — which means holding on to the client and the guest.
 final class PVESessionSource {
     let guest: PVEGuest
-    private let client: PVEClient
+    /// Also what the console's action bar acts through — power and CD-ROM writes go to
+    /// the same authenticated client that mints the tickets.
+    let client: PVEClient
 
     init(guest: PVEGuest, client: PVEClient) {
         self.guest = guest

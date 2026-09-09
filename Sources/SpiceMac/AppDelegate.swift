@@ -192,6 +192,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         }
     }
 
+    /// Power and CD-ROM for the guest in the frontmost console. Nothing to act on
+    /// without one — a `.vv` session has no API behind it either.
+    @objc func toggleActionBar(_ sender: Any?) {
+        activeSessionController?.toggleActionBar()
+    }
+
     @objc func manageServers(_ sender: Any?) {
         let controller = manageServersController ?? {
             let controller = PVEManageServersController()

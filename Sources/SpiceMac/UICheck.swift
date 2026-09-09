@@ -34,6 +34,7 @@ enum UICheck {
         print("SpiceMac UI checks")
         checkConnectPanel(snapshotDirectory: snapshotDirectory)
         checkGuestOverlay(snapshotDirectory: snapshotDirectory)
+        checkActionBar(snapshotDirectory: snapshotDirectory)
         print("")
         for failure in failures { print("  FAIL \(failure)") }
         print("\(passed) passed, \(failures.count) failed")
@@ -152,6 +153,78 @@ enum UICheck {
             overlay.cacheDisplay(in: overlay.bounds, to: rep)
             if let data = rep.representation(using: .png, properties: [:]) {
                 let path = (directory as NSString).appendingPathComponent("guest-overlay.png")
+                try? data.write(to: URL(fileURLWithPath: path))
+                print("  wrote \(path)")
+            }
+        }
+    }
+
+    /// The bar offers exactly what the token can actually do. VM.Config.CDROM is not in
+    /// PVEVMUser, so an ungated ISO control would 403 long after sign-in looked fine.
+    private static func checkActionBar(snapshotDirectory: String?) {
+        let running = guest(100, "Netbird-router", "virtual1", "running")
+        let client = PVEClient(server: PVEServer(host: "10.0.0.1", port: 8006),
+                               credentials: .apiToken(id: "root@pam!spicemac", secret: "s"),
+                               trustDelegate: nil)
+
+        let bar = PVEActionBar(guest: running, client: client)
+        bar.frame = NSRect(x: 0, y: 0, width: 460, height: PVEActionBar.height)
+
+        // Before the ACL has been read, nothing is claimed either way.
+        bar.applyCDROMAvailability(nil, availability: .noImages)
+        expect(bar.isISOControlEnabled == false,
+               "the CD-ROM control must stay disabled until the privilege is known")
+
+        // Denied: disabled, and the explanation has to name the privilege — "permission
+        // denied" alone sends people to the wrong place, since sign-in and the console work.
+        bar.applyCDROMAvailability(false, availability: .noImages)
+        expect(bar.isISOControlEnabled == false, "a token without VM.Config.CDROM must not be offered ISO actions")
+        let explanation = bar.isoControlExplanation ?? ""
+        expect(explanation.contains("VM.Config.CDROM"), "the explanation must name the missing privilege, got: “\(explanation)”")
+        expect(explanation.contains("PVEVMUser"), "the explanation must say the stock role does not include it")
+
+        // Granted: enabled, images listed by filename, and always a way to eject.
+        let images = [PVEISOImage(volumeID: "local:iso/debian-12.iso", storage: "local"),
+                      PVEISOImage(volumeID: "nas:iso/ubuntu-24.04.iso", storage: "nas")]
+        bar.applyCDROMAvailability(true, availability: .images(images))
+        expect(bar.isISOControlEnabled, "a token holding VM.Config.CDROM must be offered ISO actions")
+        expect(bar.isoMenuTitles.contains("debian-12.iso") && bar.isoMenuTitles.contains("ubuntu-24.04.iso"),
+               "ISO images must be listed by filename, got \(bar.isoMenuTitles)")
+        expect(bar.isoMenuTitles.contains("Eject"), "there must always be a way to eject, got \(bar.isoMenuTitles)")
+
+        bar.applyCDROMAvailability(true, availability: .noImages)
+        expect(bar.isoMenuTitles.contains(where: { $0.hasPrefix("No ISO images on") }),
+               "a storage holding no ISOs must say so rather than show a bare menu, got \(bar.isoMenuTitles)")
+
+        // The trap this distinction exists for: Proxmox filters the storage list by
+        // Datastore.Audit and returns [] rather than 403, so "no images" and "cannot see
+        // any storage" arrive looking identical. Confirmed live against 10.168.1.249,
+        // whose token holds VM.Config.CDROM but sees no storages at all.
+        bar.applyCDROMAvailability(true, availability: .noStorageVisible)
+        let hidden = bar.isoMenuTitles.joined(separator: " | ")
+        expect(hidden.contains("No storage visible"),
+               "an empty storage list must not be reported as an empty image list, got \(hidden)")
+        expect(hidden.contains("Datastore.Audit"),
+               "the menu must name the privilege that hides the storages, got \(hidden)")
+        expect(hidden.contains("No ISO images") == false,
+               "a privilege filter must not be phrased as missing files, got \(hidden)")
+
+        // Power is offered against the guest's actual state.
+        expect(bar.powerActionTitles.contains("Shut Down"), "a running guest must offer a graceful shutdown, got \(bar.powerActionTitles)")
+        expect(bar.powerActionTitles.contains("Start") == false, "a running guest must not offer Start, got \(bar.powerActionTitles)")
+
+        let stoppedBar = PVEActionBar(guest: guest(103, "KubuntuDev", "virtual1", "stopped"), client: client)
+        expect(stoppedBar.powerActionTitles.contains("Start"), "a stopped guest must offer Start, got \(stoppedBar.powerActionTitles)")
+        expect(stoppedBar.powerActionTitles.contains("Shut Down") == false,
+               "a stopped guest must not offer Shut Down, got \(stoppedBar.powerActionTitles)")
+
+        guard let directory = snapshotDirectory else { return }
+        bar.applyCDROMAvailability(true, availability: .images(images))
+        bar.layoutSubtreeIfNeeded()
+        if let rep = bar.bitmapImageRepForCachingDisplay(in: bar.bounds) {
+            bar.cacheDisplay(in: bar.bounds, to: rep)
+            if let data = rep.representation(using: .png, properties: [:]) {
+                let path = (directory as NSString).appendingPathComponent("action-bar.png")
                 try? data.write(to: URL(fileURLWithPath: path))
                 print("  wrote \(path)")
             }

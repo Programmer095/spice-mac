@@ -36,6 +36,8 @@ enum MainMenu {
         // is deliberately too small to trust as the only way in.
         fileMenu.addItem(withTitle: "Show Guests",
                          action: #selector(AppDelegate.toggleGuestOverlay(_:)), keyEquivalent: "l")
+        fileMenu.addItem(withTitle: "Show Guest Actions",
+                         action: #selector(AppDelegate.toggleActionBar(_:)), keyEquivalent: "L")
         fileMenu.addItem(withTitle: "Open…",
                          action: #selector(AppDelegate.openDocument(_:)), keyEquivalent: "o")
         fileMenu.addItem(withTitle: "Close",

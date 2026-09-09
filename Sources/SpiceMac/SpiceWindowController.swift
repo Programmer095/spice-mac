@@ -18,6 +18,8 @@ final class SpiceWindowController: NSWindowController, NSWindowDelegate, NSMenuI
     private let containerView = NSView()
     private let overlay = PVEGuestOverlay(session: .shared)
     private let overlayEdgeTrigger = PVEOverlayEdgeTrigger()
+    /// Only for a Proxmox session — a `.vv` file has no API behind it to act through.
+    private var actionBar: PVEActionBar?
 
     /// Picked a guest in the overlay. `AppDelegate` opens it as another tab.
     var onOpenGuest: ((PVEGuest, PVEClient) -> Void)?
@@ -139,6 +141,7 @@ final class SpiceWindowController: NSWindowController, NSWindowDelegate, NSMenuI
         ])
 
         setupGuestOverlay()
+        setupActionBar()
 
         window.contentView = containerView
         window.initialFirstResponder = displayView
@@ -167,6 +170,83 @@ final class SpiceWindowController: NSWindowController, NSWindowDelegate, NSMenuI
         overlayEdgeTrigger.autoresizingMask = [.height]
         overlayEdgeTrigger.onEnter = { [weak self] in self?.setGuestOverlayRevealed(true) }
         containerView.addSubview(overlayEdgeTrigger, positioned: .above, relativeTo: displayView)
+    }
+
+    // MARK: - Action bar
+
+    /// Top-centre, above the display, hidden until asked for. A `.vv` session gets no
+    /// bar at all: there is no authenticated client behind it to power or eject with,
+    /// and a row of controls that cannot work is worse than no row.
+    private func setupActionBar() {
+        guard case .proxmox(let source) = origin else { return }
+        let bar = PVEActionBar(guest: source.guest, client: source.client)
+        bar.onPowerAction = { [weak self] action in self?.runPowerAction(action, source: source) }
+        bar.onSetISO = { [weak self] volumeID in self?.setISO(volumeID, source: source) }
+        bar.translatesAutoresizingMaskIntoConstraints = false
+        bar.isHidden = true
+        containerView.addSubview(bar, positioned: .above, relativeTo: displayView)
+        NSLayoutConstraint.activate([
+            bar.centerXAnchor.constraint(equalTo: containerView.centerXAnchor),
+            bar.topAnchor.constraint(equalTo: containerView.topAnchor, constant: 12),
+            bar.heightAnchor.constraint(equalToConstant: PVEActionBar.height),
+        ])
+        actionBar = bar
+        bar.begin()
+    }
+
+    var isActionBarRevealed: Bool { actionBar.map { $0.isHidden == false } ?? false }
+
+    func toggleActionBar() {
+        guard let actionBar else { return }
+        actionBar.isHidden = isActionBarRevealed
+    }
+
+    private func runPowerAction(_ action: PVEPowerAction, source: PVESessionSource) {
+        if let detail = action.confirmationDetail {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "\(action.title) “\(source.guest.name)”?"
+            alert.informativeText = detail
+            alert.addButton(withTitle: action.title)
+            alert.addButton(withTitle: "Cancel")
+            guard let window else { return }
+            alert.beginSheetModal(for: window) { [weak self] response in
+                guard response == .alertFirstButtonReturn else { return }
+                self?.performPower(action, source: source)
+            }
+            return
+        }
+        performPower(action, source: source)
+    }
+
+    private func performPower(_ action: PVEPowerAction, source: PVESessionSource) {
+        Task { [weak self] in
+            do {
+                let upid = try await source.client.performPower(action, on: source.guest)
+                try await source.client.awaitTask(node: source.guest.node, upid: upid)
+            } catch {
+                self?.presentTransientError(error.localizedDescription)
+            }
+        }
+    }
+
+    private func setISO(_ volumeID: String?, source: PVESessionSource) {
+        Task { [weak self] in
+            do {
+                let upid: String
+                if let volumeID {
+                    upid = try await source.client.attachISO(volumeID, to: source.guest)
+                } else {
+                    upid = try await source.client.detachISO(from: source.guest)
+                }
+                // A synchronous config write returns no UPID; there is nothing to follow.
+                if upid.isEmpty == false {
+                    try await source.client.awaitTask(node: source.guest.node, upid: upid)
+                }
+            } catch {
+                self?.presentTransientError(error.localizedDescription)
+            }
+        }
     }
 
     var isGuestOverlayRevealed: Bool { overlay.isHidden == false }

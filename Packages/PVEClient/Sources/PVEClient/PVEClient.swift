@@ -116,6 +116,85 @@ public final class PVEClient {
         return nil
     }
 
+    // MARK: - Privileges
+
+    /// The token's visible ACL, cached for the life of the client. Permissions change
+    /// rarely and a fresh fetch per menu open would cost a request every time.
+    private var cachedPermissions: [String: [String: Int]]?
+
+    public func permissions() async throws -> [String: [String: Int]] {
+        if let cachedPermissions { return cachedPermissions }
+        let (data, _) = try await perform(path: PVEProtocol.permissionsPath(), method: "GET", body: nil)
+        let decoded = try PVEProtocol.decodePermissions(data)
+        cachedPermissions = decoded
+        return decoded
+    }
+
+    /// Whether this token may change `guest`'s CD-ROM.
+    ///
+    /// Worth asking before offering the action: `VM.Config.CDROM` is **not** in
+    /// `PVEVMUser`, so the common token signs in, lists guests and drives consoles
+    /// perfectly, and only fails when an ISO is attached. Offering a control that
+    /// cannot work and explaining why beats a 403 after the fact.
+    public func canConfigureCDROM(for guest: PVEGuest) async -> Bool {
+        guard let permissions = try? await permissions() else { return false }
+        return PVEProtocol.grants("VM.Config.CDROM", forVMID: guest.vmid, in: permissions)
+    }
+
+    // MARK: - ISO images
+
+    /// The storages on `node` that can hold content of the given type.
+    public func storages(advertising content: String, on node: String) async throws -> [String] {
+        let (data, _) = try await perform(path: PVEProtocol.storageListPath(node: node),
+                                          method: "GET", body: nil)
+        return try PVEProtocol.decodeStorages(advertising: content, from: data)
+    }
+
+    /// Every ISO image on `node`, across the storages that advertise `iso` content —
+    /// or why there are none.
+    ///
+    /// A storage that errors is skipped rather than failing the list: one unreachable
+    /// NAS should not hide the images on local storage.
+    public func listISOImages(node: String) async throws -> PVEISOAvailability {
+        let (data, _) = try await perform(path: PVEProtocol.storageListPath(node: node),
+                                          method: "GET", body: nil)
+        // Empty before filtering by content type, not after: a node with storages that
+        // simply hold no ISOs is a different answer from a node whose storages the token
+        // cannot see at all.
+        if try PVEProtocol.decodeStorageNames(data).isEmpty { return .noStorageVisible }
+
+        let storages = try PVEProtocol.decodeStorages(advertising: "iso", from: data)
+        var images: [PVEISOImage] = []
+        for storage in storages {
+            let path = PVEProtocol.storageContentPath(node: node, storage: storage, content: "iso")
+            guard let (payload, _) = try? await perform(path: path, method: "GET", body: nil),
+                  let volumes = try? PVEProtocol.decodeISOVolumeIDs(payload) else { continue }
+            images.append(contentsOf: volumes.map { PVEISOImage(volumeID: $0, storage: storage) })
+        }
+        if images.isEmpty { return .noImages }
+        return .images(images.sorted { $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending })
+    }
+
+    @discardableResult
+    public func attachISO(_ volumeID: String, to guest: PVEGuest) async throws -> String {
+        try await writeCDROM(PVEProtocol.cdromAttachValue(volumeID: volumeID), to: guest)
+    }
+
+    @discardableResult
+    public func detachISO(from guest: PVEGuest) async throws -> String {
+        try await writeCDROM(PVEProtocol.cdromDetachValue(), to: guest)
+    }
+
+    private func writeCDROM(_ value: String, to guest: PVEGuest) async throws -> String {
+        let path = PVEProtocol.configPath(node: guest.node, vmid: guest.vmid, kind: guest.kind)
+        let body = PVEProtocol.formBody(["ide2": value])
+        let (data, _) = try await perform(path: path, method: "POST", body: body)
+        // An asynchronous config write returns a UPID; a synchronous one returns null.
+        // Both are success, so a missing UPID is not an error — there is just nothing
+        // for the caller to poll.
+        return (try? PVEProtocol.decodeUPID(data)) ?? ""
+    }
+
     // MARK: - Power management
 
     /// Ask Proxmox to perform `action` on `guest`. Returns the task id (UPID) — the

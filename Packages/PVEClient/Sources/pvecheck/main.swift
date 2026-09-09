@@ -1007,4 +1007,110 @@ t.test("an error reads the same however it is presented") {
     }
 }
 
+// MARK: - Privileges that sign-in cannot tell you about
+
+t.test("a privilege granted on the guest itself counts") {
+    let payload = ["/vms/100": ["VM.Config.CDROM": 1]]
+    t.expect(PVEProtocol.grants("VM.Config.CDROM", forVMID: 100, in: payload),
+             "a grant on the guest's own ACL path must count")
+}
+
+t.test("a privilege granted on /vms or / covers the guest") {
+    t.expect(PVEProtocol.grants("VM.Config.CDROM", forVMID: 100, in: ["/vms": ["VM.Config.CDROM": 1]]),
+             "a grant on /vms must cover every guest")
+    t.expect(PVEProtocol.grants("VM.Config.CDROM", forVMID: 100, in: ["/": ["VM.Config.CDROM": 1]]),
+             "a grant on / must cover every guest")
+}
+
+t.test("a privilege on a different guest does not count") {
+    let payload = ["/vms/101": ["VM.Config.CDROM": 1]]
+    t.expect(PVEProtocol.grants("VM.Config.CDROM", forVMID: 100, in: payload) == false,
+             "a grant on VM 101 must not authorise VM 100")
+}
+
+t.test("a privilege present but zero is not granted") {
+    // Proxmox reports the whole privilege set, granted or not; a 0 is a denial.
+    let payload = ["/vms/100": ["VM.Config.CDROM": 0, "VM.Audit": 1]]
+    t.expect(PVEProtocol.grants("VM.Config.CDROM", forVMID: 100, in: payload) == false,
+             "a privilege reported as 0 is a denial, not a grant")
+}
+
+t.test("PVEVMUser does not include VM.Config.CDROM") {
+    // The trap this check exists for: a token with the stock role signs in, lists
+    // guests, and looks healthy right up to the point an ISO attach 403s.
+    let pveVMUser = ["/vms/100": ["VM.Audit": 1, "VM.Config.Disk": 1, "VM.Config.CDROM": 0,
+                                  "VM.Console": 1, "VM.PowerMgmt": 1]]
+    t.expect(PVEProtocol.grants("VM.PowerMgmt", forVMID: 100, in: pveVMUser),
+             "power actions are in the role and must stay offered")
+    t.expect(PVEProtocol.grants("VM.Config.CDROM", forVMID: 100, in: pveVMUser) == false,
+             "ISO must not be offered to a stock PVEVMUser token")
+}
+
+// MARK: - ISO attach and detach
+
+t.test("attaching an ISO writes the volume as a cdrom") {
+    t.expectEqual(PVEProtocol.cdromAttachValue(volumeID: "local:iso/debian-12.iso"),
+                  "local:iso/debian-12.iso,media=cdrom")
+}
+
+t.test("detaching leaves the drive present and empty") {
+    // Not a device deletion: a guest expects an empty drive after an eject.
+    t.expectEqual(PVEProtocol.cdromDetachValue(), "none,media=cdrom")
+}
+
+t.test("ISO volume IDs are read out of a storage content listing") {
+    let json = Data("""
+        {"data":[{"volid":"local:iso/ubuntu.iso","size":1},
+                 {"volid":"local:iso/debian-12.iso","size":2},
+                 {"size":3}]}
+        """.utf8)
+    t.expectEqual(try PVEProtocol.decodeISOVolumeIDs(json),
+                  ["local:iso/debian-12.iso", "local:iso/ubuntu.iso"])
+}
+
+t.test("only storages advertising iso content are searched") {
+    let json = Data("""
+        {"data":[{"storage":"local","content":"iso,vztmpl,backup"},
+                 {"storage":"local-lvm","content":"images,rootdir"},
+                 {"storage":"nas","content":"backup,iso"}]}
+        """.utf8)
+    t.expectEqual(try PVEProtocol.decodeStorages(advertising: "iso", from: json), ["local", "nas"])
+}
+
+t.test("a content type is matched whole, not as a substring") {
+    let json = Data(#"{"data":[{"storage":"s","content":"isos,images"}]}"#.utf8)
+    t.expect(try PVEProtocol.decodeStorages(advertising: "iso", from: json).isEmpty,
+             "“isos” is not “iso” and must not be searched for ISO images")
+}
+
+t.test("a volume ID reads as its filename in a menu") {
+    t.expectEqual(PVEProtocol.isoDisplayName(forVolumeID: "local:iso/debian-12.7-amd64.iso"),
+                  "debian-12.7-amd64.iso")
+    t.expectEqual(PVEProtocol.isoDisplayName(forVolumeID: "bare"), "bare")
+}
+
+t.test("storage and config paths encode a node name with a space") {
+    t.expectEqual(PVEProtocol.storageContentPath(node: "pve node", storage: "local", content: "iso"),
+                  "/api2/json/nodes/pve%20node/storage/local/content?content=iso")
+    t.expectEqual(PVEProtocol.configPath(node: "pve node", vmid: 100, kind: .qemu),
+                  "/api2/json/nodes/pve%20node/qemu/100/config")
+}
+
+t.test("an empty storage list is a privilege filter, not an empty node") {
+    // Proxmox filters /nodes/{node}/storage by Datastore.Audit and returns [] rather
+    // than 403. A real node always has at least one storage, so [] means "cannot see".
+    let json = Data(#"{"data":[]}"#.utf8)
+    t.expect(try PVEProtocol.decodeStorageNames(json).isEmpty,
+             "an empty payload must decode to no storages at all")
+    t.expect(try PVEProtocol.decodeStorages(advertising: "iso", from: json).isEmpty,
+             "and to no iso-capable storages either")
+}
+
+t.test("storages holding no ISOs are distinguishable from storages you cannot see") {
+    let json = Data(#"{"data":[{"storage":"local-lvm","content":"images,rootdir"}]}"#.utf8)
+    t.expectEqual(try PVEProtocol.decodeStorageNames(json), ["local-lvm"])
+    t.expect(try PVEProtocol.decodeStorages(advertising: "iso", from: json).isEmpty,
+             "a visible storage that holds no ISOs is still visible")
+}
+
 t.finishAndExit()
