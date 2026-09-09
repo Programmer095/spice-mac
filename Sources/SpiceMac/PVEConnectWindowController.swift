@@ -658,6 +658,42 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
         }
     }
 
+    // MARK: - Layout probe
+
+    /// Test seam for `UICheck`. Puts the panel in one of its two credential states at a
+    /// given window width and reports the frames the checks assert on. Drives layout
+    /// only — nothing here reaches the network, so it runs without a server.
+    func probePanelLayout(signedIn: Bool, contentWidth: CGFloat) -> PVEPanelLayout {
+        guard let window, let contentView = window.contentView else { return .zero }
+        setSignedIn(signedIn)
+        window.setContentSize(NSSize(width: contentWidth, height: 580))
+        contentView.layoutSubtreeIfNeeded()
+        return PVEPanelLayout(content: contentView.bounds,
+                              root: formGrid.superview?.frame ?? .zero,
+                              grid: formGrid.frame,
+                              list: outlineView.enclosingScrollView?.frame ?? .zero,
+                              filter: searchField.frame)
+    }
+
+    /// Renders the window's own content offscreen. `cacheDisplay` draws through the view
+    /// tree rather than reading the screen, so this needs no Screen Recording grant and
+    /// works on a window that was never ordered front.
+    func writePanelSnapshot(to directory: String, named name: String) -> String? {
+        guard let contentView = window?.contentView else { return nil }
+        contentView.layoutSubtreeIfNeeded()
+        guard let representation = contentView.bitmapImageRepForCachingDisplay(in: contentView.bounds) else { return nil }
+        contentView.cacheDisplay(in: contentView.bounds, to: representation)
+        guard let data = representation.representation(using: .png, properties: [:]) else { return nil }
+        let path = (directory as NSString).appendingPathComponent(name)
+        do {
+            try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
+            try data.write(to: URL(fileURLWithPath: path))
+            return path
+        } catch {
+            return nil
+        }
+    }
+
     // MARK: - Window
 
     func windowDidResize(_ notification: Notification) {

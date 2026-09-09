@@ -7,7 +7,7 @@ export DEVELOPER_DIR
 
 .DEFAULT_GOAL := help
 
-.PHONY: help doctor setup build run test all openssl icon debug root release check-version clean distclean
+.PHONY: help doctor setup build run test uicheck all openssl icon debug root release check-version clean distclean
 
 help: ## Show this help
 	@awk 'BEGIN{FS=":.*## "} /^[a-zA-Z0-9_-]+:.*## /{printf "  \033[36m%-14s\033[0m %s\n",$$1,$$2}' $(MAKEFILE_LIST)
@@ -24,11 +24,19 @@ build: ## Build and assemble build/SpiceMac.app
 run: ## Open build/SpiceMac.app
 	@open build/SpiceMac.app
 
-test: ## Run the dependency-free check runners (vvcheck + pvecheck + inputcheck + scalecheck)
+test: ## Run every check runner (vvcheck + pvecheck + inputcheck + scalecheck + uicheck)
 	@( cd Packages/VVConfig && swift run vvcheck )
 	@( cd Packages/PVEClient && swift run pvecheck )
 	@( cd Packages/SpiceInputMap && swift run inputcheck )
 	@( cd Packages/DisplayScale && swift run scalecheck )
+	@$(MAKE) --no-print-directory uicheck
+
+uicheck: ## Assert the window layouts (needs build/SpiceMac.app; SNAPSHOTS=dir to also write PNGs)
+	@test -x build/SpiceMac.app/Contents/MacOS/SpiceMac || { \
+		echo "uicheck: build/SpiceMac.app is missing — run 'make build' first."; \
+		echo "         It runs the real controllers, so there is nothing to check without it."; \
+		exit 1; }
+	@./build/SpiceMac.app/Contents/MacOS/SpiceMac --ui-check $(SNAPSHOTS)
 
 all: doctor setup build ## Doctor, fetch the sysroot, and build (first-time setup)
 
