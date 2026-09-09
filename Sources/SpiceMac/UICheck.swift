@@ -190,7 +190,17 @@ enum UICheck {
         expect(bar.isISOControlEnabled, "a token holding VM.Config.CDROM must be offered ISO actions")
         expect(bar.isoMenuTitles.contains("debian-12.iso") && bar.isoMenuTitles.contains("ubuntu-24.04.iso"),
                "ISO images must be listed by filename, got \(bar.isoMenuTitles)")
-        expect(bar.isoMenuTitles.contains("Eject"), "there must always be a way to eject, got \(bar.isoMenuTitles)")
+        expect(bar.isoMenuTitles.contains("Nothing to eject"),
+               "with an empty drive there is nothing to eject, got \(bar.isoMenuTitles)")
+        expect(bar.tickedISOTitles.isEmpty, "nothing is mounted, so nothing should be ticked")
+
+        // With a disc in the drive: it is ticked, and Eject becomes a real action. The
+        // mounted value is what Proxmox reports, which carries a size= the app never wrote.
+        bar.applyCDROMAvailability(true, availability: .images(images),
+                                   mounted: "local:iso/debian-12.iso")
+        expect(bar.tickedISOTitles == ["debian-12.iso"],
+               "the mounted image must be ticked, got \(bar.tickedISOTitles)")
+        expect(bar.isoMenuTitles.contains("Eject"), "a mounted disc must be ejectable, got \(bar.isoMenuTitles)")
 
         bar.applyCDROMAvailability(true, availability: .noImages)
         expect(bar.isoMenuTitles.contains(where: { $0.hasPrefix("No ISO images on") }),

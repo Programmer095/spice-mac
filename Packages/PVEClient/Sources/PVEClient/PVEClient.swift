@@ -175,6 +175,14 @@ public final class PVEClient {
         return .images(images.sorted { $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending })
     }
 
+    /// One key from a guest's live config — what is actually attached right now,
+    /// rather than what was last written.
+    public func configValue(_ key: String, for guest: PVEGuest) async throws -> String? {
+        let path = PVEProtocol.configPath(node: guest.node, vmid: guest.vmid, kind: guest.kind)
+        let (data, _) = try await perform(path: path, method: "GET", body: nil)
+        return try PVEProtocol.decodeConfigValue(data, key: key)
+    }
+
     @discardableResult
     public func attachISO(_ volumeID: String, to guest: PVEGuest) async throws -> String {
         try await writeCDROM(PVEProtocol.cdromAttachValue(volumeID: volumeID), to: guest)

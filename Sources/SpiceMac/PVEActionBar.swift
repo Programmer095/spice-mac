@@ -36,6 +36,9 @@ final class PVEActionBar: NSView {
     /// still checking rather than claiming a grant it has not confirmed.
     private var canConfigureCDROM: Bool?
     private var availability: PVEISOAvailability = .noImages
+    /// What is in the drive right now, so the menu can tick it and Eject can be offered
+    /// only when there is something to eject.
+    private var mountedVolumeID: String?
 
     init(guest: PVEGuest, client: PVEClient) {
         self.guest = guest
@@ -97,10 +100,12 @@ final class PVEActionBar: NSView {
         canConfigureCDROM = granted
         if granted {
             availability = (try? await client.listISOImages(node: guest.node)) ?? .noStorageVisible
+            let raw = try? await client.configValue("ide2", for: guest)
+            mountedVolumeID = PVEProtocol.attachedISOVolumeID(fromCDROMValue: raw ?? nil)
         }
         // On the record: a greyed-out CD-ROM is the kind of thing people ask about, and
         // the answer is either the privilege or an empty storage.
-        Self.log.info("cdrom for \(self.guest.name, privacy: .public): granted=\(granted, privacy: .public) \(String(describing: self.availability), privacy: .public)")
+        Self.log.info("cdrom for \(self.guest.name, privacy: .public): granted=\(granted, privacy: .public) mounted=\(self.mountedVolumeID ?? "none", privacy: .public)")
         rebuildISOMenu()
     }
 
@@ -132,6 +137,7 @@ final class PVEActionBar: NSView {
                     let item = NSMenuItem(title: image.displayName, action: #selector(isoSelected(_:)), keyEquivalent: "")
                     item.target = self
                     item.representedObject = image.volumeID
+                    item.state = image.volumeID == mountedVolumeID ? .on : .off
                     menu.addItem(item)
                 }
             case .noImages:
@@ -144,10 +150,14 @@ final class PVEActionBar: NSView {
                 menu.addItem(disabled("The token needs Datastore.Audit to list ISO images."))
             }
             menu.addItem(.separator())
-            let eject = NSMenuItem(title: "Eject", action: #selector(isoSelected(_:)), keyEquivalent: "")
-            eject.target = self
-            eject.representedObject = nil        // nil means detach
-            menu.addItem(eject)
+            if mountedVolumeID == nil {
+                menu.addItem(disabled("Nothing to eject"))
+            } else {
+                let eject = NSMenuItem(title: "Eject", action: #selector(isoSelected(_:)), keyEquivalent: "")
+                eject.target = self
+                eject.representedObject = nil    // nil means detach
+                menu.addItem(eject)
+            }
         }
         isoButton.menu = menu
     }
@@ -182,9 +192,16 @@ final class PVEActionBar: NSView {
     }
 
     /// Drives the states the checks assert on without a server behind them.
-    func applyCDROMAvailability(_ granted: Bool?, availability: PVEISOAvailability) {
+    func applyCDROMAvailability(_ granted: Bool?,
+                                availability: PVEISOAvailability,
+                                mounted: String? = nil) {
         canConfigureCDROM = granted
         self.availability = availability
+        mountedVolumeID = mounted
         rebuildISOMenu()
+    }
+
+    var tickedISOTitles: [String] {
+        (isoButton.menu?.items.filter { $0.state == .on }.map(\.title)) ?? []
     }
 }

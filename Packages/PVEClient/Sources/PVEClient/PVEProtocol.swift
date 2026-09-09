@@ -122,6 +122,31 @@ public enum PVEProtocol {
         }.sorted()
     }
 
+    /// The ISO currently in a guest's CD-ROM, from its raw `ide2` value.
+    ///
+    /// Proxmox writes back more than was sent — `local:iso/x.iso,media=cdrom,size=632640K` —
+    /// so the volume is the part before the first comma. An empty drive is the literal
+    /// `none`, which is not a volume.
+    public static func attachedISOVolumeID(fromCDROMValue value: String?) -> String? {
+        guard let value, let first = value.split(separator: ",").first else { return nil }
+        let volume = String(first).trimmingCharacters(in: .whitespaces)
+        return (volume.isEmpty || volume == "none") ? nil : volume
+    }
+
+    /// One key out of a guest's config payload. Values are scalars in practice
+    /// (`ide2` is a string, `memory` a number), so both are rendered as text.
+    public static func decodeConfigValue(_ data: Data, key: String) throws -> String? {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let payload = object["data"] as? [String: Any] else {
+            throw PVEError.decoding("unexpected guest config payload")
+        }
+        switch payload[key] {
+        case let text as String: return text
+        case let number as NSNumber: return number.stringValue
+        default: return nil
+        }
+    }
+
     /// The filename a volume ID ends in — `local:iso/debian-12.iso` reads as
     /// `debian-12.iso` in a menu.
     public static func isoDisplayName(forVolumeID volumeID: String) -> String {

@@ -1113,4 +1113,33 @@ t.test("storages holding no ISOs are distinguishable from storages you cannot se
              "a visible storage that holds no ISOs is still visible")
 }
 
+t.test("a guest's current CD-ROM is read back out of its config") {
+    let json = Data(#"{"data":{"ide2":"local:iso/debian-12.iso,media=cdrom","memory":2048,"name":"vm"}}"#.utf8)
+    t.expectEqual(try PVEProtocol.decodeConfigValue(json, key: "ide2"),
+                  "local:iso/debian-12.iso,media=cdrom")
+    t.expectEqual(try PVEProtocol.decodeConfigValue(json, key: "memory"), "2048")
+}
+
+t.test("a config key that is absent reads as nothing, not as an error") {
+    // A guest with no CD-ROM device simply has no ide2 key.
+    let json = Data(#"{"data":{"name":"vm"}}"#.utf8)
+    t.expectEqual(try PVEProtocol.decodeConfigValue(json, key: "ide2"), nil)
+}
+
+t.test("the mounted ISO is read out of what Proxmox writes back, not what was sent") {
+    // Confirmed live: attaching local:iso/x.iso,media=cdrom comes back with a size= the
+    // caller never wrote, so an equality check against the sent value would never match.
+    t.expectEqual(PVEProtocol.attachedISOVolumeID(
+        fromCDROMValue: "local:iso/en_windows_xp.iso,media=cdrom,size=632640K"),
+        "local:iso/en_windows_xp.iso")
+    t.expectEqual(PVEProtocol.attachedISOVolumeID(
+        fromCDROMValue: "local:iso/x.iso,media=cdrom"), "local:iso/x.iso")
+}
+
+t.test("an empty drive is not a mounted volume") {
+    t.expectEqual(PVEProtocol.attachedISOVolumeID(fromCDROMValue: "none,media=cdrom"), nil)
+    t.expectEqual(PVEProtocol.attachedISOVolumeID(fromCDROMValue: nil), nil)
+    t.expectEqual(PVEProtocol.attachedISOVolumeID(fromCDROMValue: ""), nil)
+}
+
 t.finishAndExit()
