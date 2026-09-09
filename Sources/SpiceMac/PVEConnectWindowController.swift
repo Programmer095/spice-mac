@@ -658,6 +658,15 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
         }
     }
 
+    private static func describe(_ state: PVEInstanceState) -> String {
+        switch state {
+        case .signedOut: return "signedOut"
+        case .signingIn: return "signingIn"
+        case .signedIn(let guests): return "signedIn(\(guests.count) guests)"
+        case .failed(let error): return "failed(\(error))"
+        }
+    }
+
     // MARK: - Layout probe
 
     /// Test seam for `UICheck`. Puts the panel in one of its two credential states at a
@@ -707,6 +716,12 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
     // MARK: - Fleet state
 
     private func handleFleetStateChanged(_ state: PVEFleetState) {
+        // Every sign-in transition, on the record. A stuck sign-in shows nothing but a
+        // spinner, and `log show --info --predicate 'subsystem == "org.spicemac.SpiceMac"'`
+        // is the difference between diagnosing one and guessing at it.
+        for instance in state.instances {
+            Self.log.info("fleet \(instance.profile.host, privacy: .public) -> \(Self.describe(instance.state), privacy: .public)")
+        }
         refreshTree()
         resolvePendingPrimaryPersist(state)
         updatePrimaryFormState()
@@ -1019,6 +1034,11 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
         // reusing the same UUID (or vmid, on another node) can't inherit a stale row.
         instanceRowCache = instanceRowCache.filter { liveInstanceIDs.contains($0.key) }
         guestRowCache = guestRowCache.filter { liveGuestKeys.contains($0.key) }
+        // Same reason: a removed server's diagnosis would otherwise be rendered as the
+        // subtitle of whatever later takes its id, and its `diagnosedInstances` entry
+        // would suppress the new server's own diagnosis.
+        emptyListHints = emptyListHints.filter { liveInstanceIDs.contains($0.key) }
+        diagnosedInstances = diagnosedInstances.intersection(liveInstanceIDs)
 
         let previouslyKnown = knownInstanceIDs
         knownInstanceIDs = liveInstanceIDs

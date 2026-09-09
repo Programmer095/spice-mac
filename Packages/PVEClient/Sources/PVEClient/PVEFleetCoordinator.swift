@@ -51,15 +51,22 @@ public final class PVEFleetCoordinator {
     /// case, which would otherwise be a server that can never be signed in again.
     /// Injected for the same portability reason as `secretProvider`.
     private let secretPrompt: (@Sendable (PVEServerProfile) async -> String?)?
+    /// How a signed-in client's guests are fetched. The only I/O the coordinator does,
+    /// so injecting it is what makes the sign-in edge — not just the reducer — coverable
+    /// without a server. `PVEClient.init` opens no connection, so the real client is
+    /// still built either way.
+    private let loadGuests: @Sendable (PVEClient) async throws -> [PVEGuest]
 
     public init(trustDelegate: PVETrustDelegate?,
                 secretProvider: @escaping @Sendable (PVEServerProfile) -> String?,
-                secretPrompt: (@Sendable (PVEServerProfile) async -> String?)? = nil) {
+                secretPrompt: (@Sendable (PVEServerProfile) async -> String?)? = nil,
+                loadGuests: @escaping @Sendable (PVEClient) async throws -> [PVEGuest] = { try await $0.listGuests() }) {
         let prompts = PVEPromptQueue()
         self.prompts = prompts
         self.trustDelegate = trustDelegate.map { PVEQueuedTrustDelegate(wrapping: $0, prompts: prompts) }
         self.secretProvider = secretProvider
         self.secretPrompt = secretPrompt
+        self.loadGuests = loadGuests
     }
 
     public func client(for id: UUID) -> PVEClient? { clients[id] }
@@ -99,6 +106,12 @@ public final class PVEFleetCoordinator {
     /// queuing it would serialize it behind other servers' prompts for no reason.
     public func signIn(_ id: UUID, usingSecret secret: String? = nil) {
         guard let instance = state.instance(id), instance.profile.isComplete else { return }
+        // An automatic sign-in must not stack on one already running — the browser's
+        // reveal and `signInAll` can both reach here for the same instance, and two
+        // flows would each mint a client and race to install it. An explicit secret is
+        // a deliberate action (the user just typed it and pressed Sign In) and always
+        // goes through, otherwise fixing a bad credential would be swallowed.
+        if secret == nil, instance.state == .signingIn { return }
         apply(.signInStarted(id))
         let profile = instance.profile
 
@@ -134,13 +147,22 @@ public final class PVEFleetCoordinator {
                                trustDelegate: trustDelegate)
         clients[id] = client
         do {
-            let guests = try await client.listGuests()
+            let guests = try await loadGuests(client)
             apply(.guestsLoaded(id, guests))
         } catch let error as PVEError {
+            discard(client, for: id)
             apply(.signInFailed(id, error))
         } catch {
+            discard(client, for: id)
             apply(.signInFailed(id, .transport(error.localizedDescription)))
         }
+    }
+
+    /// Drops a client that failed to sign in, so `refresh` falls back to a fresh sign-in
+    /// instead of retrying with the credentials that were just rejected. Identity-checked
+    /// because a later attempt may already have installed its own client here.
+    private func discard(_ client: PVEClient, for id: UUID) {
+        if clients[id] === client { clients[id] = nil }
     }
 
     public func signOut(_ id: UUID) {
@@ -155,7 +177,7 @@ public final class PVEFleetCoordinator {
         Task { [weak self] in
             guard let self else { return }
             do {
-                self.apply(.guestsLoaded(id, try await client.listGuests()))
+                self.apply(.guestsLoaded(id, try await self.loadGuests(client)))
             } catch let error as PVEError {
                 self.apply(.signInFailed(id, error))
             } catch {

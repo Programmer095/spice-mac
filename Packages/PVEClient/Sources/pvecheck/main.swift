@@ -772,47 +772,181 @@ t.test("a stored secret is used without troubling the prompt") {
 
 // MARK: - Editing a signed-in profile
 
+/// A coordinator whose guests arrive without a server, so the tests below can reach
+/// states that only exist *after* a successful sign-in. `signedInCoordinator` returns
+/// one already holding a live client for `profile`.
+@MainActor
+func signedInCoordinator(_ profile: PVEServerProfile,
+                         guests: [PVEGuest] = [],
+                         onChange: ((PVEFleetState) -> Void)? = nil) -> PVEFleetCoordinator {
+    let coordinator = PVEFleetCoordinator(trustDelegate: nil,
+                                          secretProvider: { _ in "s" },
+                                          loadGuests: { _ in guests })
+    coordinator.setProfiles([profile])
+    coordinator.onChange = onChange
+    coordinator.signIn(profile.id)
+    return coordinator
+}
+
+/// A port nothing is listening on, so a test that does reach the network fails at once.
+func sampleProfile(host: String = "127.0.0.1") -> PVEServerProfile {
+    signInProfile(host: host, port: 1)
+}
+
+let sampleGuest = PVEGuest(vmid: 100, name: "vm", node: "n1", status: "running", kind: .qemu)
+
 t.test("editing where a signed-in server points signs it out") {
-    let profile = signInProfile(host: "127.0.0.1", port: 1)
+    let profile = sampleProfile()
     let id = profile.id
-    let box = Box<PVEInstanceState?>(nil)
+    let live = Box<AnyObject?>(nil)
+    let signedIn = Box<Bool>(false)
+    let after = Box<PVEInstanceState?>(nil)
     let host = Box<String?>(nil)
     let hasClient = Box<Bool?>(nil)
 
     Task { @MainActor in
-        let coordinator = PVEFleetCoordinator(trustDelegate: nil, secretProvider: { _ in "s" })
-        coordinator.setProfiles([profile])
+        let coordinator = signedInCoordinator(profile, guests: [sampleGuest]) { state in
+            if case .signedIn = state.instance(id)?.state { signedIn.value = true }
+        }
+        live.value = coordinator
+    }
+    waitOnMain { signedIn.value }
+    t.expect(signedIn.value, "the instance never reached .signedIn, so the rest asserts nothing")
+
+    Task { @MainActor in
+        guard let coordinator = live.value as? PVEFleetCoordinator else { return }
         var moved = profile
         moved.host = "192.0.2.1"
         coordinator.setProfiles([moved])
         host.value = coordinator.state.instance(id)?.profile.host
         hasClient.value = coordinator.client(for: id) != nil
-        box.value = coordinator.state.instance(id)?.state
+        after.value = coordinator.state.instance(id)?.state
     }
-    waitOnMain { box.value != nil }
-    t.expectEqual(box.value, .signedOut)
+    waitOnMain { after.value != nil }
+    t.expectEqual(after.value, .signedOut)
     t.expectEqual(host.value, "192.0.2.1")
     t.expectEqual(hasClient.value, false)
 }
 
 t.test("a cosmetic edit leaves a signed-in server alone") {
-    let profile = signInProfile(host: "127.0.0.1", port: 1)
+    let profile = sampleProfile()
     let id = profile.id
+    let live = Box<AnyObject?>(nil)
+    let signedIn = Box<Bool>(false)
+    let after = Box<PVEInstanceState?>(nil)
     let label = Box<String?>(nil)
-    let state = Box<PVEInstanceState?>(nil)
+    let hasClient = Box<Bool?>(nil)
 
     Task { @MainActor in
-        let coordinator = PVEFleetCoordinator(trustDelegate: nil, secretProvider: { _ in "s" })
-        coordinator.setProfiles([profile])
+        let coordinator = signedInCoordinator(profile, guests: [sampleGuest]) { state in
+            if case .signedIn = state.instance(id)?.state { signedIn.value = true }
+        }
+        live.value = coordinator
+    }
+    waitOnMain { signedIn.value }
+    t.expect(signedIn.value, "the instance never reached .signedIn, so the rest asserts nothing")
+
+    Task { @MainActor in
+        guard let coordinator = live.value as? PVEFleetCoordinator else { return }
         var renamed = profile
         renamed.label = "Rack B"
         coordinator.setProfiles([renamed])
-        state.value = coordinator.state.instance(id)?.state
         label.value = coordinator.state.instance(id)?.profile.label
+        hasClient.value = coordinator.client(for: id) != nil
+        after.value = coordinator.state.instance(id)?.state
     }
-    waitOnMain { label.value != nil }
+    waitOnMain { after.value != nil }
     t.expectEqual(label.value, "Rack B")
-    t.expectEqual(state.value, .signedOut)
+    t.expectEqual(after.value, .signedIn([sampleGuest]))
+    t.expectEqual(hasClient.value, true)
+}
+
+// MARK: - Recovering from a failed sign-in
+
+t.test("a failed sign-in leaves no client behind, so Refresh cannot reuse bad credentials") {
+    let profile = sampleProfile()
+    let id = profile.id
+    let live = Box<AnyObject?>(nil)
+    let settled = Box<PVEInstanceState?>(nil)
+    let hasClient = Box<Bool?>(nil)
+
+    Task { @MainActor in
+        let coordinator = PVEFleetCoordinator(trustDelegate: nil,
+                                              secretProvider: { _ in "s" },
+                                              loadGuests: { _ in throw PVEError.unauthorized })
+        coordinator.setProfiles([profile])
+        coordinator.onChange = { state in
+            guard let current = state.instance(id)?.state, current != .signingIn else { return }
+            if case .failed = current { settled.value = current }
+        }
+        live.value = coordinator
+        coordinator.signIn(id)
+    }
+    waitOnMain { settled.value != nil }
+
+    Task { @MainActor in
+        hasClient.value = (live.value as? PVEFleetCoordinator)?.client(for: id) != nil
+    }
+    waitOnMain { hasClient.value != nil }
+    t.expectEqual(hasClient.value, false)
+}
+
+// MARK: - Re-entrancy
+
+t.test("signing in twice does not start the work twice") {
+    let profile = sampleProfile()
+    let id = profile.id
+    let live = Box<AnyObject?>(nil)
+    let attempts = Box<Int>(0)
+    let settled = Box<Bool>(false)
+
+    Task { @MainActor in
+        let coordinator = PVEFleetCoordinator(trustDelegate: nil,
+                                              secretProvider: { _ in "s" },
+                                              loadGuests: { _ in
+                                                  attempts.value += 1
+                                                  try? await Task.sleep(nanoseconds: 200_000_000)
+                                                  return [sampleGuest]
+                                              })
+        coordinator.setProfiles([profile])
+        coordinator.onChange = { state in
+            if case .signedIn = state.instance(id)?.state { settled.value = true }
+        }
+        live.value = coordinator
+        coordinator.signIn(id)
+        coordinator.signIn(id)   // the auto sign-in racing the user's button
+    }
+    waitOnMain { settled.value }
+    t.expectEqual(attempts.value, 1)
+}
+
+t.test("an explicitly typed secret still gets through while a sign-in is in flight") {
+    let profile = sampleProfile()
+    let id = profile.id
+    let live = Box<AnyObject?>(nil)
+    let attempts = Box<Int>(0)
+    let settled = Box<Bool>(false)
+
+    Task { @MainActor in
+        let coordinator = PVEFleetCoordinator(trustDelegate: nil,
+                                              secretProvider: { _ in "stored" },
+                                              loadGuests: { _ in
+                                                  attempts.value += 1
+                                                  return [sampleGuest]
+                                              })
+        coordinator.setProfiles([profile])
+        coordinator.onChange = { state in
+            if case .signedIn = state.instance(id)?.state { settled.value = true }
+        }
+        live.value = coordinator
+        coordinator.signIn(id)
+        coordinator.signIn(id, usingSecret: "typed")
+    }
+    // Wait on the attempt count, not on `.signedIn` — whichever attempt lands first
+    // settles the state, and stopping there would pass without the second ever running.
+    waitOnMain { attempts.value >= 2 }
+    _ = settled.value
+    t.expect(attempts.value >= 2, "a deliberate Sign In must not be swallowed by an automatic one, saw \(attempts.value)")
 }
 
 t.finishAndExit()
