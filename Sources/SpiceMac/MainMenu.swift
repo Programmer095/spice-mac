@@ -32,6 +32,10 @@ enum MainMenu {
                          action: #selector(AppDelegate.connectToProxmox(_:)), keyEquivalent: "n")
         fileMenu.addItem(withTitle: "Manage Servers…",
                          action: #selector(AppDelegate.manageServers(_:)), keyEquivalent: ",")
+        // The reliable route to the picker. The edge hover is only an accelerator, and
+        // is deliberately too small to trust as the only way in.
+        fileMenu.addItem(withTitle: "Show Guests",
+                         action: #selector(AppDelegate.toggleGuestOverlay(_:)), keyEquivalent: "l")
         fileMenu.addItem(withTitle: "Open…",
                          action: #selector(AppDelegate.openDocument(_:)), keyEquivalent: "o")
         fileMenu.addItem(withTitle: "Close",

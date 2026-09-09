@@ -181,6 +181,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         proxmoxBrowser.present()
     }
 
+    /// Toggles the guest picker in the frontmost console. There is nothing to overlay in
+    /// the connect tab — that window *is* the full browser — so this brings it forward
+    /// instead of doing nothing.
+    @objc func toggleGuestOverlay(_ sender: Any?) {
+        if let controller = activeSessionController {
+            controller.toggleGuestOverlay()
+        } else {
+            proxmoxBrowser.present(autoConnect: false)
+        }
+    }
+
     @objc func manageServers(_ sender: Any?) {
         let controller = manageServersController ?? {
             let controller = PVEManageServersController()
@@ -330,6 +341,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             if let accessed = share.accessed { securityScopedShares.insert(accessed) }
         }
         let controller = SpiceWindowController(client: client, origin: origin)
+        controller.onOpenGuest = { [weak self] guest, client in
+            self?.openProxmoxConsole(guest: guest, client: client)
+        }
         controller.onClose = { [weak self, weak controller] in
             guard let self else { return }
             self.windowControllers.removeAll { $0 === controller }

@@ -46,6 +46,19 @@ public struct PVEFleetState: Equatable, Sendable {
         instances.flatMap(\.state.guests)
     }
 
+    /// Every guest in the fleet paired with the server it came from, filtered by a
+    /// free-text query. The tree in the connect tab and the flat picker in a console
+    /// overlay show the same fleet through different shapes, and this is the matching
+    /// rule they share — one place to change, and testable without either of them.
+    public func guests(matching query: String) -> [PVEFleetGuestMatch] {
+        let needle = query.trimmingCharacters(in: .whitespaces).lowercased()
+        return instances.flatMap { instance in
+            instance.state.guests
+                .filter { needle.isEmpty || $0.matches(needle) || instance.profile.matches(needle) }
+                .map { PVEFleetGuestMatch(instance: instance, guest: $0) }
+        }
+    }
+
     public static func reduce(_ state: PVEFleetState, _ event: PVEFleetEvent) -> PVEFleetState {
         var next = state
         switch event {
@@ -71,5 +84,39 @@ public struct PVEFleetState: Equatable, Sendable {
     private mutating func setState(_ newState: PVEInstanceState, for id: UUID) {
         guard let index = instances.firstIndex(where: { $0.id == id }) else { return }
         instances[index].state = newState
+    }
+}
+
+
+/// A guest and the server it belongs to. Two clusters can share a node name and a VMID,
+/// so a guest alone does not identify a row.
+public struct PVEFleetGuestMatch: Equatable, Sendable, Identifiable {
+    public let instance: PVEInstanceSnapshot
+    public let guest: PVEGuest
+
+    public var id: String { "\(instance.id.uuidString)/\(guest.id)" }
+
+    public init(instance: PVEInstanceSnapshot, guest: PVEGuest) {
+        self.instance = instance
+        self.guest = guest
+    }
+}
+
+public extension PVEGuest {
+    /// `needle` is expected lowercased and trimmed.
+    func matches(_ needle: String) -> Bool {
+        needle.isEmpty
+            || name.lowercased().contains(needle)
+            || String(vmid).contains(needle)
+            || node.lowercased().contains(needle)
+    }
+}
+
+public extension PVEServerProfile {
+    /// `needle` is expected lowercased and trimmed.
+    func matches(_ needle: String) -> Bool {
+        needle.isEmpty
+            || label.lowercased().contains(needle)
+            || host.lowercased().contains(needle)
     }
 }

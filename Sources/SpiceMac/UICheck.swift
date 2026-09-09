@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 import AppKit
+import PVEClient
 
 /// Frames worth asserting on, measured after a forced layout pass.
 struct PVEPanelLayout {
@@ -32,6 +33,7 @@ enum UICheck {
         isolateFromStoredFleet()
         print("SpiceMac UI checks")
         checkConnectPanel(snapshotDirectory: snapshotDirectory)
+        checkGuestOverlay(snapshotDirectory: snapshotDirectory)
         print("")
         for failure in failures { print("  FAIL \(failure)") }
         print("\(passed) passed, \(failures.count) failed")
@@ -82,6 +84,96 @@ enum UICheck {
             if let path = controller.writePanelSnapshot(to: directory, named: name) {
                 print("  wrote \(path)")
             }
+        }
+    }
+
+    // MARK: - The console overlay
+
+    /// The picker is the only route to a guest from inside a console, so an empty or
+    /// mis-filtered list is a dead end. Driven through a session whose guests arrive
+    /// without a server.
+    private static func checkGuestOverlay(snapshotDirectory: String?) {
+        let home = server(label: "Home", host: "10.0.0.1")
+        let rack = server(label: "Rack B", host: "10.0.0.2")
+        let guests: [String: [PVEGuest]] = [
+            home.host: [guest(100, "Netbird-router", "virtual1", "running"),
+                        guest(102, "OpnSense", "virtual1", "running"),
+                        guest(103, "KubuntuDev", "virtual1", "stopped")],
+            rack.host: [guest(200, "build-agent", "rack-1", "running")],
+        ]
+        let coordinator = PVEFleetCoordinator(trustDelegate: nil,
+                                              secretProvider: { _ in "secret" },
+                                              loadGuests: { client in guests[client.server.host] ?? [] })
+        let session = PVEFleetSession(coordinator: coordinator)
+        session.setProfiles([home, rack])
+        coordinator.signInAll()
+
+        let overlay = PVEGuestOverlay(session: session)
+        overlay.frame = NSRect(x: 0, y: 0, width: PVEGuestOverlay.width, height: 600)
+
+        // The sign-ins resolve on the main queue; give them a turn before asserting.
+        settle(until: { overlay.visibleMatches.count == 4 })
+        overlay.layoutSubtreeIfNeeded()
+
+        expect(overlay.visibleMatches.count == 4,
+               "picker shows \(overlay.visibleMatches.count) guests, expected all 4 across both servers")
+        expect(overlay.isEmptyStateVisible == false,
+               "picker shows the empty state with 4 guests in the fleet: “\(overlay.emptyStateText)”")
+
+        // A stopped guest has no console to open; it is listed, but not pickable.
+        let stopped = overlay.visibleMatches.firstIndex { $0.guest.status == "stopped" }
+        if let stopped {
+            expect(overlay.canSelectRow(stopped) == false,
+                   "a stopped guest must not be selectable — there is no console to open")
+        } else {
+            expect(false, "the stopped guest fixture is missing, so selectability asserts nothing")
+        }
+        if let running = overlay.visibleMatches.firstIndex(where: { $0.guest.status == "running" }) {
+            expect(overlay.canSelectRow(running), "a running guest must be selectable")
+        }
+
+        overlay.setFilter("opn")
+        expect(overlay.visibleMatches.count == 1 && overlay.visibleMatches.first?.guest.name == "OpnSense",
+               "filtering by name matched \(overlay.visibleMatches.map(\.guest.name))")
+        overlay.setFilter("200")
+        expect(overlay.visibleMatches.first?.guest.vmid == 200, "filtering by VMID failed")
+        overlay.setFilter("rack b")
+        expect(overlay.visibleMatches.count == 1,
+               "filtering by server label matched \(overlay.visibleMatches.count), expected Rack B's one guest")
+        overlay.setFilter("zzz")
+        expect(overlay.visibleMatches.isEmpty && overlay.isEmptyStateVisible,
+               "a query matching nothing must say so rather than show a blank list")
+        overlay.setFilter("")
+        expect(overlay.visibleMatches.count == 4, "clearing the filter must restore the whole fleet")
+
+        guard let directory = snapshotDirectory else { return }
+        overlay.layoutSubtreeIfNeeded()
+        if let rep = overlay.bitmapImageRepForCachingDisplay(in: overlay.bounds) {
+            overlay.cacheDisplay(in: overlay.bounds, to: rep)
+            if let data = rep.representation(using: .png, properties: [:]) {
+                let path = (directory as NSString).appendingPathComponent("guest-overlay.png")
+                try? data.write(to: URL(fileURLWithPath: path))
+                print("  wrote \(path)")
+            }
+        }
+    }
+
+    private static func server(label: String, host: String) -> PVEServerProfile {
+        var profile = PVEServerProfile(label: label, host: host, port: 8006)
+        profile.tokenID = "root@pam!spicemac"
+        return profile
+    }
+
+    private static func guest(_ vmid: Int, _ name: String, _ node: String, _ status: String) -> PVEGuest {
+        PVEGuest(vmid: vmid, name: name, node: node, status: status, kind: .qemu)
+    }
+
+    /// Spins the run loop until `condition` holds, so work hopped to the main queue has
+    /// landed before anything is asserted about it.
+    private static func settle(timeout: TimeInterval = 5, until condition: () -> Bool) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while condition() == false, Date() < deadline {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02))
         }
     }
 

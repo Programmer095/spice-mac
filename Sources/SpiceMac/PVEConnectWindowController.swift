@@ -135,16 +135,15 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
     private var diagnosedInstances: Set<UUID> = []
 
     /// Drives sign-in across the whole fleet: one client per configured server,
-    /// folded into a tree instead of this window showing only the first one.
-    private let coordinator: PVEFleetCoordinator
+    /// folded into a tree instead of this window showing only the first one. Shared with
+    /// the console overlays, so signing in here lights those up too.
+    private let session = PVEFleetSession.shared
+    private var coordinator: PVEFleetCoordinator { session.coordinator }
+    private var fleetObservation: PVEFleetSession.Token?
 
     // MARK: - Lifecycle
 
     init() {
-        coordinator = PVEFleetCoordinator(
-            trustDelegate: PVEProfileStore.shared,
-            secretProvider: { PVEProfileStore.shared.secret(for: $0) },
-            secretPrompt: { profile in await MainActor.run { PVESecretPrompt.ask(for: profile) } })
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 580),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable],
                               backing: .buffered,
@@ -164,18 +163,14 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
         window.delegate = self
         buildUI()
         loadProfile()
-        coordinator.onChange = { [weak self] state in self?.handleFleetStateChanged(state) }
-        // Populate the fleet from whatever is already on disk — Manage Servers only
-        // reports changes when the user saves there, so without this the tree stays
-        // empty until that sheet is opened once.
-        coordinator.setProfiles(PVEProfileStore.shared.profiles)
+        fleetObservation = session.observe { [weak self] state in self?.handleFleetStateChanged(state) }
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
     /// Forwarded from the Manage Servers sheet.
     func setProfiles(_ profiles: [PVEServerProfile]) {
-        coordinator.setProfiles(profiles)
+        session.setProfiles(profiles)
         // The credentials form is a view onto the fleet's first slot. If the sheet
         // changed that slot, the fields — and `loadedSecret` — still hold pre-sheet
         // values, and the next Sign In would write them straight back over the edit.

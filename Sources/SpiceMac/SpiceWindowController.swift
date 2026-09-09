@@ -5,6 +5,7 @@ import OSLog
 import CocoaSpice
 import SpiceController
 import DisplayScale
+import PVEClient
 
 /// Owns one SPICE session window: hosts the `SpiceDisplayView`, reflects
 /// connection state, resizes to the guest, and exposes the Connection/USB menu
@@ -15,6 +16,11 @@ final class SpiceWindowController: NSWindowController, NSWindowDelegate, NSMenuI
     private let origin: SpiceSessionOrigin
     private let displayView = SpiceDisplayView()
     private let containerView = NSView()
+    private let overlay = PVEGuestOverlay(session: .shared)
+    private let overlayEdgeTrigger = PVEOverlayEdgeTrigger()
+
+    /// Picked a guest in the overlay. `AppDelegate` opens it as another tab.
+    var onOpenGuest: ((PVEGuest, PVEClient) -> Void)?
     private let statusLabel = NSTextField(labelWithString: "Connecting…")
     private let reconnectButton = NSButton(title: "Reconnect", target: nil, action: nil)
     private var cancellables = Set<AnyCancellable>()
@@ -132,8 +138,72 @@ final class SpiceWindowController: NSWindowController, NSWindowDelegate, NSMenuI
             reconnectButton.topAnchor.constraint(equalTo: statusLabel.bottomAnchor, constant: 16),
         ])
 
+        setupGuestOverlay()
+
         window.contentView = containerView
         window.initialFirstResponder = displayView
+    }
+
+    // MARK: - Guest overlay
+
+    /// The picker rides above the display, off the left edge until asked for. Autoresizing
+    /// rather than Auto Layout to match `displayView`: the container is resized directly on
+    /// every guest-resolution change, and mixing the two here would fight that path.
+    private func setupGuestOverlay() {
+        overlay.frame = NSRect(x: -PVEGuestOverlay.width, y: 0,
+                               width: PVEGuestOverlay.width, height: containerView.bounds.height)
+        overlay.autoresizingMask = [.height]
+        overlay.isHidden = true
+        overlay.onOpenGuest = { [weak self] guest, client in
+            self?.setGuestOverlayRevealed(false)
+            self?.onOpenGuest?(guest, client)
+        }
+        containerView.addSubview(overlay, positioned: .above, relativeTo: displayView)
+
+        // A hairline strip, not a broad hover region: this sits over a live guest, and a
+        // generous target would fire constantly while working inside the VM. The menu
+        // command is the route that carries the load.
+        overlayEdgeTrigger.frame = NSRect(x: 0, y: 0, width: 4, height: containerView.bounds.height)
+        overlayEdgeTrigger.autoresizingMask = [.height]
+        overlayEdgeTrigger.onEnter = { [weak self] in self?.setGuestOverlayRevealed(true) }
+        containerView.addSubview(overlayEdgeTrigger, positioned: .above, relativeTo: displayView)
+    }
+
+    var isGuestOverlayRevealed: Bool { overlay.isHidden == false }
+
+    func toggleGuestOverlay() { setGuestOverlayRevealed(!isGuestOverlayRevealed) }
+
+    func setGuestOverlayRevealed(_ revealed: Bool, animated: Bool = true) {
+        guard revealed != isGuestOverlayRevealed else { return }
+        let height = containerView.bounds.height
+        let shown = NSRect(x: 0, y: 0, width: PVEGuestOverlay.width, height: height)
+        let hidden = NSRect(x: -PVEGuestOverlay.width, y: 0, width: PVEGuestOverlay.width, height: height)
+
+        if revealed {
+            overlay.frame = hidden
+            overlay.isHidden = false
+            overlay.prepareForReveal()
+        }
+        let target = revealed ? shown : hidden
+        guard animated else {
+            overlay.frame = target
+            overlay.isHidden = !revealed
+            if !revealed { window?.makeFirstResponder(displayView) }
+            return
+        }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.16
+            context.allowsImplicitAnimation = true
+            overlay.animator().frame = target
+        } completionHandler: { [weak self] in
+            guard let self else { return }
+            if revealed == false {
+                self.overlay.isHidden = true
+                // Hand the keyboard back to the guest, or the next keystroke lands in a
+                // panel that is no longer on screen.
+                self.window?.makeFirstResponder(self.displayView)
+            }
+        }
     }
 
     @objc private func reconnectTapped() {
