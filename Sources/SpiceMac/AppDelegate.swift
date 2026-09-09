@@ -28,7 +28,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     private var proxmoxBrowser: PVEConnectWindowController {
         if let createdBrowser { return createdBrowser }
-        let controller = PVEConnectWindowController()
+        let controller = PVEConnectWindowController(session: .shared)
         controller.onOpenConsole = { [weak self] guest, client in
             self?.openProxmoxConsole(guest: guest, client: client)
         }

@@ -50,11 +50,6 @@ private final class PVEFleetGuestRow: NSObject {
     }
 }
 
-private extension PVEInstanceState {
-    var isSignedIn: Bool { if case .signedIn = self { return true }; return false }
-    var isFailed: Bool { if case .failed = self { return true }; return false }
-}
-
 /// The Proxmox browser: sign in to one or more nodes, then pick a guest and open its
 /// console.
 ///
@@ -125,13 +120,16 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
     /// Drives sign-in across the whole fleet: one client per configured server,
     /// folded into a tree instead of this window showing only the first one. Shared with
     /// the console overlays, so signing in here lights those up too.
-    private let session = PVEFleetSession.shared
+    private let session: PVEFleetSession
     private var coordinator: PVEFleetCoordinator { session.coordinator }
     private var fleetObservation: PVEFleetSession.Token?
 
     // MARK: - Lifecycle
 
-    init() {
+    /// The session is a parameter so `UICheck` can drive a fleet whose guests arrive
+    /// without a server. Everything in the app passes `.shared`.
+    init(session: PVEFleetSession) {
+        self.session = session
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 580),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable],
                               backing: .buffered,
@@ -174,11 +172,24 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         guard autoConnect else { return }
-        if let id = currentSelectionInstanceID() {
+        connectOnReveal()
+    }
+
+    /// What a reveal costs: one refresh for the server being looked at, and a sign-in
+    /// for every server that is not connected.
+    ///
+    /// These are two different jobs and it used to do only one of them. A selection meant
+    /// refresh-and-nothing-else, and without one it signed in the fleet *only while
+    /// nothing was signed in yet* — so the moment one server came up, the rest could
+    /// never join it. With several servers configured that left the fleet permanently
+    /// part-connected, and the tree showed no reason why.
+    ///
+    /// Split out from `present` so it can be checked without putting a window on screen.
+    func connectOnReveal() {
+        if let id = currentSelectionInstanceID(), coordinator.state.instance(id)?.state.isSignedIn == true {
             coordinator.refresh(id)
-        } else if coordinator.state.instances.contains(where: { $0.state.isSignedIn }) == false {
-            coordinator.signInAll()
         }
+        coordinator.signInAll()
     }
 
     // MARK: - Building
@@ -602,7 +613,7 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
         // spinner, and `log show --info --predicate 'subsystem == "org.spicemac.SpiceMac"'`
         // is the difference between diagnosing one and guessing at it.
         for instance in state.instances {
-            Self.log.info("fleet \(instance.profile.host, privacy: .public) -> \(Self.describe(instance.state), privacy: .public)")
+            Self.log.info("fleet \(instance.profile.displayName, privacy: .public) -> \(Self.describe(instance.state), privacy: .public)")
         }
         refreshTree()
         resolvePendingPrimaryPersist(state)

@@ -11,6 +11,9 @@ public enum PVEInstanceState: Equatable, Sendable {
         if case .signedIn(let guests) = self { return guests }
         return []
     }
+
+    public var isSignedIn: Bool { if case .signedIn = self { return true }; return false }
+    public var isFailed: Bool { if case .failed = self { return true }; return false }
 }
 
 public struct PVEInstanceSnapshot: Equatable, Identifiable, Sendable {

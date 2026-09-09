@@ -36,6 +36,7 @@ enum UICheck {
         checkGuestOverlay(snapshotDirectory: snapshotDirectory)
         checkActionBar(snapshotDirectory: snapshotDirectory)
         checkServerForm()
+        checkRevealConnectsWholeFleet()
         print("")
         for failure in failures { print("  FAIL \(failure)") }
         print("\(passed) passed, \(failures.count) failed")
@@ -49,7 +50,7 @@ enum UICheck {
     /// in hides every row of the credentials grid; a collapsed grid used to drag the
     /// whole panel down with it, taking the filter field and the guest tree along.
     private static func checkConnectPanel(snapshotDirectory: String?) {
-        let controller = PVEConnectWindowController()
+        let controller = PVEConnectWindowController(session: .shared)
         let widths: [CGFloat] = [652, 1024, 1400, 1632]
 
         for signedIn in [false, true] {
@@ -347,6 +348,53 @@ enum UICheck {
         expect(sheetForm.tokenSecretField.stringValue.isEmpty,
                "the token secret field kept a value after switching to password auth")
         expect(sheetForm.secret == "pw", "password auth must read the password field")
+    }
+
+    /// Revealing the browser must bring the *whole* fleet online, not just whichever
+    /// server happens to be first or already up.
+    private static func checkRevealConnectsWholeFleet() {
+        let up = server(label: "Up", host: "10.0.0.1")
+        let down = server(label: "Down", host: "10.0.0.2")
+        let failFirst = Flag(true)
+        let sample = guest(100, "vm", "n1", "running")
+        let coordinator = PVEFleetCoordinator(
+            trustDelegate: nil,
+            secretProvider: { _ in "secret" },
+            loadGuests: { client in
+                // 10.0.0.2 refuses once, the way a node that was briefly down would.
+                if client.server.host == "10.0.0.2", failFirst.value { throw PVEError.unauthorized }
+                return [sample]
+            })
+        let session = PVEFleetSession(coordinator: coordinator)
+        session.setProfiles([up, down])
+        let controller = PVEConnectWindowController(session: session)
+
+        coordinator.signInAll()
+        settle(until: { coordinator.state.instances.allSatisfy { $0.state.isSignedIn || $0.state.isFailed } })
+        expect(coordinator.state.instance(up.id)?.state.isSignedIn == true,
+               "the reachable server should be signed in after the first pass")
+        expect(coordinator.state.instance(down.id)?.state.isFailed == true,
+               "the failing server should be failed after the first pass, so the rest asserts something")
+
+        // The node comes back. Revealing the browser has to notice.
+        failFirst.value = false
+        controller.connectOnReveal()
+        settle(until: { coordinator.state.instance(down.id)?.state.isSignedIn == true })
+        expect(coordinator.state.instance(down.id)?.state.isSignedIn == true,
+               "revealing the browser left a recovered server disconnected — the fleet stays part-connected")
+        expect(coordinator.state.instance(up.id)?.state.isSignedIn == true,
+               "the server that was already up must still be signed in")
+    }
+
+    /// A box, so the guest loader can be flipped from outside the concurrent closure.
+    private final class Flag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: Bool
+        init(_ value: Bool) { stored = value }
+        var value: Bool {
+            get { lock.lock(); defer { lock.unlock() }; return stored }
+            set { lock.lock(); defer { lock.unlock() }; stored = newValue }
+        }
     }
 
     private static func server(label: String, host: String) -> PVEServerProfile {

@@ -1185,4 +1185,79 @@ t.test("isComplete and the reported problem cannot disagree") {
     }
 }
 
+// MARK: - Bringing a whole fleet online
+
+t.test("signing in the fleet retries a server that failed, not just untouched ones") {
+    // A node that was briefly down, or a password fixed since, leaves the instance in
+    // .failed. Skipping those means the fleet stays permanently half-connected: nothing
+    // short of a manual per-row Sign In ever brings it back.
+    let a = sampleProfile(host: "10.0.0.1")
+    let b = sampleProfile(host: "10.0.0.2")
+    let live = Box<AnyObject?>(nil)
+    let attempts = Box<Int>(0)
+    let aState = Box<String?>(nil)
+
+    Task { @MainActor in
+        let coordinator = PVEFleetCoordinator(trustDelegate: nil,
+                                              secretProvider: { _ in "s" },
+                                              loadGuests: { client in
+                                                  attempts.value += 1
+                                                  // 10.0.0.1 fails on the first pass, then works.
+                                                  if client.server.host == "10.0.0.1", attempts.value <= 2 {
+                                                      throw PVEError.unauthorized
+                                                  }
+                                                  return [sampleGuest]
+                                              })
+        coordinator.setProfiles([a, b])
+        coordinator.onChange = { state in
+            switch state.instance(a.id)?.state {
+            case .signedIn: aState.value = "signedIn"
+            case .failed: aState.value = "failed"
+            default: break
+            }
+        }
+        live.value = coordinator
+        coordinator.signInAll()
+    }
+    waitOnMain { aState.value == "failed" }
+    t.expectEqual(aState.value, "failed")
+
+    Task { @MainActor in (live.value as? PVEFleetCoordinator)?.signInAll() }
+    waitOnMain { aState.value == "signedIn" }
+    t.expectEqual(aState.value, "signedIn")
+}
+
+t.test("signing in the fleet leaves an already signed-in server alone") {
+    // Retrying a healthy server would cost a needless request and, worse, a Keychain
+    // prompt on a build the Keychain does not know.
+    let a = sampleProfile(host: "10.0.0.1")
+    let live = Box<AnyObject?>(nil)
+    let attempts = Box<Int>(0)
+    let signedIn = Box<Bool>(false)
+
+    Task { @MainActor in
+        let coordinator = PVEFleetCoordinator(trustDelegate: nil,
+                                              secretProvider: { _ in "s" },
+                                              loadGuests: { _ in
+                                                  attempts.value += 1
+                                                  return [sampleGuest]
+                                              })
+        coordinator.setProfiles([a])
+        coordinator.onChange = { state in
+            if case .signedIn = state.instance(a.id)?.state { signedIn.value = true }
+        }
+        live.value = coordinator
+        coordinator.signInAll()
+    }
+    waitOnMain { signedIn.value }
+
+    let after = Box<Int?>(nil)
+    Task { @MainActor in
+        (live.value as? PVEFleetCoordinator)?.signInAll()
+        after.value = attempts.value
+    }
+    waitOnMain { after.value != nil }
+    t.expectEqual(after.value, 1)
+}
+
 t.finishAndExit()

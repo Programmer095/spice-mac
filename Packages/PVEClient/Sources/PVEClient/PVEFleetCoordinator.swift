@@ -90,8 +90,16 @@ public final class PVEFleetCoordinator {
         apply(.profilesChanged(profiles))
     }
 
+    /// Brings every server that is not signed in online — including ones that *failed*,
+    /// not only untouched ones. A node that was briefly down, or a credential fixed
+    /// since, otherwise stays failed forever and the fleet sits permanently
+    /// half-connected, with a manual per-row Sign In as the only way back.
+    ///
+    /// Servers already signed in are left alone: retrying one costs a needless request
+    /// and, on a build the Keychain does not recognise, another authorization prompt.
+    /// An attempt already in flight is skipped by `signIn`'s own re-entrancy guard.
     public func signInAll() {
-        for instance in state.instances where instance.state == .signedOut {
+        for instance in state.instances where instance.state.isSignedIn == false {
             signIn(instance.id)
         }
     }
