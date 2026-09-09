@@ -1142,4 +1142,47 @@ t.test("an empty drive is not a mounted volume") {
     t.expectEqual(PVEProtocol.attachedISOVolumeID(fromCDROMValue: ""), nil)
 }
 
+// MARK: - One definition of "ready to sign in"
+
+t.test("a complete profile has no problem to report") {
+    var profile = PVEServerProfile(label: "Home", host: "10.0.0.1", port: 8006)
+    profile.tokenID = "root@pam!spicemac"
+    t.expectEqual(profile.completenessProblem, nil)
+    t.expect(profile.isComplete, "a token profile with host and token ID is ready")
+}
+
+t.test("a missing host is named as the missing host") {
+    var profile = PVEServerProfile(label: "Home", host: "   ")
+    profile.tokenID = "root@pam!spicemac"
+    t.expectEqual(profile.completenessProblem, "Enter the Proxmox server address.")
+}
+
+t.test("a token ID missing its realm or token name is named as such") {
+    // The trap: "root" looks like a username and is accepted by every field check.
+    var profile = PVEServerProfile(label: "Home", host: "10.0.0.1")
+    profile.tokenID = "root"
+    t.expectEqual(profile.completenessProblem, "Enter a full API token ID, e.g. root@pam!spicemac.")
+    profile.tokenID = "root@pam"
+    t.expectEqual(profile.completenessProblem, "Enter a full API token ID, e.g. root@pam!spicemac.")
+}
+
+t.test("password auth wants a username, not a token ID") {
+    var profile = PVEServerProfile(label: "Home", host: "10.0.0.1")
+    profile.authKind = .password
+    profile.username = "  "
+    t.expectEqual(profile.completenessProblem, "Enter a username.")
+    profile.username = "root"
+    t.expectEqual(profile.completenessProblem, nil)
+}
+
+t.test("isComplete and the reported problem cannot disagree") {
+    // isComplete is derived from the message, so a future edit to one carries the other.
+    var profile = PVEServerProfile(label: "Home", host: "")
+    for (host, tokenID) in [("", "root@pam!x"), ("h", "root"), ("h", "root@pam!x")] {
+        profile.host = host
+        profile.tokenID = tokenID
+        t.expectEqual(profile.isComplete, profile.completenessProblem == nil)
+    }
+}
+
 t.finishAndExit()

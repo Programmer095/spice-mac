@@ -35,6 +35,7 @@ enum UICheck {
         checkConnectPanel(snapshotDirectory: snapshotDirectory)
         checkGuestOverlay(snapshotDirectory: snapshotDirectory)
         checkActionBar(snapshotDirectory: snapshotDirectory)
+        checkServerForm()
         print("")
         for failure in failures { print("  FAIL \(failure)") }
         print("\(passed) passed, \(failures.count) failed")
@@ -77,6 +78,20 @@ enum UICheck {
                        "signed out: credentials grid is \(Int(folded.grid.width))pt, expected to fill the \(Int(folded.root.width))pt panel")
             }
         }
+
+        // A Manage Servers save reloads this form. Reloading re-applies the auth-kind
+        // rule, which unhides credential rows — and an edit that leaves the server signed
+        // in (a rename, say) gets no fleet change to fold them back. The credentials must
+        // not pop open over a live session.
+        _ = controller.probePanelLayout(signedIn: true, contentWidth: 1400)
+        controller.probeReloadForm()
+        // As-is: asking the probe to re-assert "signed in" would re-hide the rows itself
+        // and the check would pass whatever the reload actually did.
+        let afterReload = controller.probePanelLayoutAsIs(contentWidth: 1400)
+        expect(afterReload.grid.height == 0,
+               "reloading the form while signed in re-opened the credentials rows (\(Int(afterReload.grid.height))pt)")
+        expect(afterReload.root.width == 620,
+               "reloading the form while signed in collapsed the panel to \(Int(afterReload.root.width))pt")
 
         guard let directory = snapshotDirectory else { return }
         for signedIn in [false, true] {
@@ -239,6 +254,99 @@ enum UICheck {
                 print("  wrote \(path)")
             }
         }
+    }
+
+    /// The form both surfaces share. It exists because the connect window and the
+    /// Manage Servers sheet had grown two copies that drifted — so the round trip and
+    /// the auth-kind rule are checked here, once, rather than trusted twice.
+    private static func checkServerForm() {
+        let sheetForm = PVEServerForm(includesLabel: true)
+        let connectForm = PVEServerForm(includesLabel: false)
+
+        expect(sheetForm.grid.numberOfRows == 8,
+               "the sheet's form should have 8 rows, has \(sheetForm.grid.numberOfRows)")
+        expect(connectForm.grid.numberOfRows == 7,
+               "the connect form has no Label row, so 7, has \(connectForm.grid.numberOfRows)")
+
+        // Row indices shift when the label row is present. Hand-maintained index lists
+        // in two files is precisely what drifted, so check both shapes.
+        // Asserted against the rows the *fields* actually sit in, not against the index
+        // lists the form computed. Checking `form.tokenRows` would only prove those rows
+        // behave like whatever the form decided they were — a mis-numbered list would
+        // stay self-consistent and pass.
+        func rowHidden(_ form: PVEServerForm, holding view: NSView) -> Bool? {
+            form.grid.cell(for: view)?.row?.isHidden
+        }
+
+        for (name, form) in [("sheet", sheetForm), ("connect", connectForm)] {
+            form.authSelector.selectedSegment = 0
+            form.refreshAuthKindRows()
+            expect(rowHidden(form, holding: form.tokenIDField) == false,
+                   "\(name): the Token ID row must be visible for token auth")
+            expect(rowHidden(form, holding: form.tokenSecretField) == false,
+                   "\(name): the Secret row must be visible for token auth")
+            expect(rowHidden(form, holding: form.passwordField) == true,
+                   "\(name): the Password row must be hidden for token auth")
+
+            form.authSelector.selectedSegment = 1
+            form.refreshAuthKindRows()
+            expect(rowHidden(form, holding: form.tokenIDField) == true,
+                   "\(name): the Token ID row must be hidden for password auth")
+            expect(rowHidden(form, holding: form.passwordField) == false,
+                   "\(name): the Password row must be visible for password auth")
+            expect(rowHidden(form, holding: form.usernameField) == false,
+                   "\(name): the Username row must be visible for password auth")
+            // The rows every auth kind needs stay put either way.
+            expect(rowHidden(form, holding: form.hostField) == false,
+                   "\(name): the Server row must never be hidden by an auth-kind switch")
+
+            // Unfolding must reapply the rule, not reveal both credential styles at once.
+            form.setRowsHidden(true)
+            expect(form.allRows.allSatisfy(\.isHidden), "\(name): every row must fold away")
+            expect(rowHidden(form, holding: form.hostField) == true,
+                   "\(name): folding away must hide the Server row too")
+            form.setRowsHidden(false)
+            expect(rowHidden(form, holding: form.tokenIDField) == true,
+                   "\(name): unfolding revealed the Token ID row while password auth is selected")
+            expect(rowHidden(form, holding: form.passwordField) == false,
+                   "\(name): unfolding left the Password row hidden under password auth")
+        }
+
+        // The sheet builds a window around this form. Constructing it exercises that
+        // layout, which nothing else here reaches.
+        let sheet = PVEManageServersController()
+        expect(sheet.probeFormGrid.numberOfRows == 8,
+               "the sheet's window did not build the labelled form, got \(sheet.probeFormGrid.numberOfRows) rows")
+
+        // A profile survives the trip through the fields unchanged.
+        var profile = PVEServerProfile(label: "Rack B", host: "10.0.0.2", port: 8007)
+        profile.tokenID = "root@pam!spicemac"
+        profile.rememberSecret = false
+        sheetForm.apply(profile, secret: "s3cret")
+        let round = sheetForm.profile(basedOn: PVEServerProfile(label: "wrong", host: "wrong"))
+        expect(round.label == "Rack B" && round.host == "10.0.0.2" && round.port == 8007,
+               "the sheet's form lost a field in the round trip: \(round.label)/\(round.host)/\(round.port)")
+        expect(round.tokenID == "root@pam!spicemac", "token ID lost in the round trip")
+        expect(round.rememberSecret == false, "the Remember toggle lost its off state")
+        expect(sheetForm.secret == "s3cret", "the typed secret is not readable back")
+
+        // The connect form has no label field, so the label must come from the base —
+        // otherwise editing the first server would blank the name given in the sheet.
+        connectForm.apply(profile, secret: "s3cret")
+        var base = profile
+        base.label = "Kept From Storage"
+        expect(connectForm.profile(basedOn: base).label == "Kept From Storage",
+               "the connect form overwrote a label it has no field for")
+
+        // Switching auth kind must not carry a secret into the field it does not belong
+        // to — that is how one server's credentials get saved against another.
+        var passwordProfile = profile
+        passwordProfile.authKind = .password
+        passwordProfile.username = "root"
+        sheetForm.apply(passwordProfile, secret: "pw")
+        expect(sheetForm.tokenSecretField.stringValue.isEmpty,
+               "the token secret field kept a value after switching to password auth")
+        expect(sheetForm.secret == "pw", "password auth must read the password field")
     }
 
     private static func server(label: String, host: String) -> PVEServerProfile {

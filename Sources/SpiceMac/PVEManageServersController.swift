@@ -5,6 +5,7 @@ import PVEClient
 /// Edits the whole fleet in one sheet: a server list on the left, the credential form
 /// on the right. Several servers cannot be edited in the single inline form the
 /// connect window used, so this is where that editing now happens.
+@MainActor
 final class PVEManageServersController: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate {
 
     /// Called with the saved fleet once the sheet is dismissed via Done.
@@ -17,24 +18,10 @@ final class PVEManageServersController: NSObject, NSWindowDelegate, NSTableViewD
     private let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
     private let doneButton = NSButton(title: "Done", target: nil, action: nil)
 
-    // Same field construction as PVEConnectWindowController.buildUI(): same
-    // placeholders, same realm popup, same Remember in Keychain checkbox, so the two
-    // surfaces cannot validate a profile differently. The label field has no
-    // counterpart there — the connect window only ever edits a single unlabeled slot.
-    private let labelField = NSTextField()
-    private let hostField = NSTextField()
-    private let portField = NSTextField()
-    private let authSelector = NSSegmentedControl(labels: ["API Token", "Username & Password"],
-                                                  trackingMode: .selectOne, target: nil, action: nil)
-    private let tokenIDField = NSTextField()
-    private let tokenSecretField = NSSecureTextField()
-    private let usernameField = NSTextField()
-    private let realmPopUp = NSPopUpButton()
-    private let passwordField = NSSecureTextField()
-    private let rememberCheckbox = NSButton(checkboxWithTitle: "Remember in Keychain", target: nil, action: nil)
-
-    private var tokenRows: [NSGridRow] = []
-    private var passwordRows: [NSGridRow] = []
+    /// Shared with the connect window's inline form, so the two surfaces cannot drift
+    /// apart again. The label field is the one difference: the connect window only ever
+    /// edits the first slot and keeps whatever name was given here.
+    private let form = PVEServerForm(includesLabel: true)
 
     private var profiles: [PVEServerProfile] = []
     /// The secret in each field, keyed by profile id, kept in step with `profiles` as
@@ -60,6 +47,10 @@ final class PVEManageServersController: NSObject, NSWindowDelegate, NSTableViewD
     private var selectedIndex: Int?
 
     // MARK: - Lifecycle
+
+    /// Test seam for `UICheck`: the form this sheet built, so constructing the sheet is
+    /// itself checkable.
+    var probeFormGrid: NSGridView { form.grid }
 
     override init() {
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 420),
@@ -100,54 +91,7 @@ final class PVEManageServersController: NSObject, NSWindowDelegate, NSTableViewD
     // MARK: - Building
 
     private func buildUI() {
-        for field in [labelField, hostField, portField, tokenIDField, usernameField] {
-            field.isEditable = true
-            field.isBordered = true
-            field.bezelStyle = .roundedBezel
-        }
-        labelField.placeholderString = "Nickname (e.g. Home, Rack B)"
-        hostField.placeholderString = "proxmox.example.com"
-        portField.placeholderString = "8006"
-        portField.formatter = onlyDigitsFormatter()
-        tokenIDField.placeholderString = "root@pam!spicemac"
-        tokenSecretField.placeholderString = "token secret (UUID)"
-        usernameField.placeholderString = "root"
-        passwordField.placeholderString = "password"
-        realmPopUp.addItems(withTitles: ["pam", "pve"])
-
-        authSelector.target = self
-        authSelector.action = #selector(authKindChanged)
-        authSelector.selectedSegment = 0
-
-        rememberCheckbox.state = .on
-
-        let grid = NSGridView(views: [
-            [NSTextField(labelWithString: "Label:"), labelField],
-            [NSTextField(labelWithString: "Server:"), hostField,
-             NSTextField(labelWithString: "Port:"), portField],
-            [NSTextField(labelWithString: "Sign in with:"), authSelector],
-            [NSTextField(labelWithString: "Token ID:"), tokenIDField],
-            [NSTextField(labelWithString: "Secret:"), tokenSecretField],
-            [NSTextField(labelWithString: "Username:"), usernameField,
-             NSTextField(labelWithString: "Realm:"), realmPopUp],
-            [NSTextField(labelWithString: "Password:"), passwordField],
-            [NSGridCell.emptyContentView, rememberCheckbox],
-        ])
-        grid.column(at: 0).xPlacement = .trailing
-        grid.rowSpacing = 8
-        grid.columnSpacing = 8
-        for field in [labelField, hostField, tokenIDField, tokenSecretField, usernameField, passwordField] {
-            field.setContentHuggingPriority(.defaultLow, for: .horizontal)
-            field.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
-        }
-        hostField.widthAnchor.constraint(greaterThanOrEqualToConstant: 220).isActive = true
-        grid.mergeCells(inHorizontalRange: NSRange(location: 1, length: 3), verticalRange: NSRange(location: 0, length: 1))
-        grid.mergeCells(inHorizontalRange: NSRange(location: 1, length: 3), verticalRange: NSRange(location: 2, length: 1))
-        grid.mergeCells(inHorizontalRange: NSRange(location: 1, length: 3), verticalRange: NSRange(location: 3, length: 1))
-        grid.mergeCells(inHorizontalRange: NSRange(location: 1, length: 3), verticalRange: NSRange(location: 4, length: 1))
-        grid.mergeCells(inHorizontalRange: NSRange(location: 1, length: 3), verticalRange: NSRange(location: 6, length: 1))
-        tokenRows = [grid.row(at: 3), grid.row(at: 4)]
-        passwordRows = [grid.row(at: 5), grid.row(at: 6)]
+        let grid = form.grid
 
         configureTable()
         let scrollView = NSScrollView()
@@ -214,7 +158,6 @@ final class PVEManageServersController: NSObject, NSWindowDelegate, NSTableViewD
             root.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -20),
         ])
 
-        authKindChanged()
     }
 
     private func configureTable() {
@@ -230,15 +173,6 @@ final class PVEManageServersController: NSObject, NSWindowDelegate, NSTableViewD
         if #available(macOS 11.0, *) { tableView.style = .inset }
     }
 
-    private func onlyDigitsFormatter() -> NumberFormatter {
-        let formatter = NumberFormatter()
-        formatter.numberStyle = .none
-        formatter.allowsFloats = false
-        formatter.minimum = 1
-        formatter.maximum = 65535
-        return formatter
-    }
-
     // MARK: - Row selection
 
     /// Fields are shared across rows, so switching rows must bank whatever is on
@@ -246,51 +180,21 @@ final class PVEManageServersController: NSObject, NSWindowDelegate, NSTableViewD
     /// them — otherwise an edit is silently lost the moment focus moves elsewhere.
     private func captureFieldsIntoSelection() {
         guard let index = selectedIndex, profiles.indices.contains(index) else { return }
-        var profile = profiles[index]
-        profile.label = labelField.stringValue.trimmingCharacters(in: .whitespaces)
-        profile.host = hostField.stringValue.trimmingCharacters(in: .whitespaces)
-        profile.port = Int(portField.stringValue) ?? 8006
-        profile.authKind = authSelector.selectedSegment == 0 ? .apiToken : .password
-        profile.tokenID = tokenIDField.stringValue.trimmingCharacters(in: .whitespaces)
-        profile.username = usernameField.stringValue.trimmingCharacters(in: .whitespaces)
-        profile.realm = realmPopUp.titleOfSelectedItem ?? "pam"
-        profile.rememberSecret = rememberCheckbox.state == .on
+        let profile = form.profile(basedOn: profiles[index])
         profiles[index] = profile
-        editedSecrets[profile.id] = authSelector.selectedSegment == 0
-            ? tokenSecretField.stringValue : passwordField.stringValue
+        editedSecrets[profile.id] = form.secret
     }
 
     private func loadSelectionIntoFields() {
         guard let index = selectedIndex, profiles.indices.contains(index) else {
-            labelField.stringValue = ""
-            hostField.stringValue = ""
-            portField.stringValue = ""
-            tokenIDField.stringValue = ""
-            tokenSecretField.stringValue = ""
-            usernameField.stringValue = ""
-            passwordField.stringValue = ""
-            realmPopUp.selectItem(withTitle: "pam")
-            rememberCheckbox.state = .on
-            authSelector.selectedSegment = 0
-            authKindChanged()
-            setFieldsEnabled(false)
+            form.clear()
+            form.setEnabled(false)
             return
         }
-        setFieldsEnabled(true)
+        form.setEnabled(true)
         let profile = profiles[index]
         loadSecretIfNeeded(profile.id)
-        labelField.stringValue = profile.label
-        hostField.stringValue = profile.host
-        portField.stringValue = String(profile.port)
-        tokenIDField.stringValue = profile.tokenID
-        usernameField.stringValue = profile.username
-        realmPopUp.selectItem(withTitle: profile.realm)
-        rememberCheckbox.state = profile.rememberSecret ? .on : .off
-        authSelector.selectedSegment = profile.authKind == .apiToken ? 0 : 1
-        let secret = editedSecrets[profile.id] ?? ""
-        tokenSecretField.stringValue = profile.authKind == .apiToken ? secret : ""
-        passwordField.stringValue = profile.authKind == .password ? secret : ""
-        authKindChanged()
+        form.apply(profile, secret: editedSecrets[profile.id] ?? "")
     }
 
     /// Reads one row's stored secret, once. Looked up under the account the profile had
@@ -305,16 +209,6 @@ final class PVEManageServersController: NSObject, NSWindowDelegate, NSTableViewD
         editedSecrets[id] = stored ?? ""
     }
 
-    private func setFieldsEnabled(_ enabled: Bool) {
-        for field in [labelField, hostField, portField, tokenIDField, tokenSecretField,
-                      usernameField, passwordField] as [NSControl] {
-            field.isEnabled = enabled
-        }
-        authSelector.isEnabled = enabled
-        realmPopUp.isEnabled = enabled
-        rememberCheckbox.isEnabled = enabled
-    }
-
     private func selectRow(_ index: Int?) {
         captureFieldsIntoSelection()
         selectedIndex = index
@@ -327,12 +221,6 @@ final class PVEManageServersController: NSObject, NSWindowDelegate, NSTableViewD
         removeButton.isEnabled = index != nil
     }
 
-    @objc private func authKindChanged() {
-        let usingToken = authSelector.selectedSegment == 0
-        for row in tokenRows { row.isHidden = !usingToken }
-        for row in passwordRows { row.isHidden = usingToken }
-    }
-
     // MARK: - Actions
 
     @objc private func addServer(_ sender: Any?) {
@@ -342,7 +230,7 @@ final class PVEManageServersController: NSObject, NSWindowDelegate, NSTableViewD
         editedSecrets[profile.id] = ""
         tableView.reloadData()
         selectRow(profiles.count - 1)
-        window.makeFirstResponder(hostField)
+        window.makeFirstResponder(form.hostField)
     }
 
     @objc private func removeServer(_ sender: Any?) {
@@ -368,6 +256,16 @@ final class PVEManageServersController: NSObject, NSWindowDelegate, NSTableViewD
 
     @objc private func done(_ sender: Any?) {
         captureFieldsIntoSelection()
+
+        // The sheet used to save whatever was on screen. A half-filled row then went
+        // into the fleet and sat signed-out forever, because `signIn` returns silently
+        // on an incomplete profile — so the failure appeared nowhere near its cause.
+        // Blank rows the user never touched are still dropped rather than complained about.
+        if let (index, problem) = firstIncompleteServer() {
+            selectRow(index)
+            presentProblem(problem, for: profiles[index])
+            return
+        }
 
         let saved = profiles.filter { isUntouchedNewServer($0) == false }
         let discarded = profiles.filter { isUntouchedNewServer($0) }
@@ -424,6 +322,24 @@ final class PVEManageServersController: NSObject, NSWindowDelegate, NSTableViewD
         onProfilesChanged?(saved)
 
         dismiss()
+    }
+
+    /// The first row that cannot be signed in, ignoring rows never filled in at all.
+    private func firstIncompleteServer() -> (index: Int, problem: String)? {
+        for (index, profile) in profiles.enumerated() where isUntouchedNewServer(profile) == false {
+            if let problem = profile.completenessProblem { return (index, problem) }
+        }
+        return nil
+    }
+
+    private func presentProblem(_ problem: String, for profile: PVEServerProfile) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        let name = profile.label.isEmpty ? (profile.host.isEmpty ? "This server" : profile.host) : profile.label
+        alert.messageText = "\(name) is not ready to sign in."
+        alert.informativeText = problem + "\n\nFix it, or use Cancel to discard every change."
+        alert.addButton(withTitle: "OK")
+        alert.beginSheetModal(for: window)
     }
 
     /// Discards whatever is on screen and in `profiles`/`removedProfiles` — no write to

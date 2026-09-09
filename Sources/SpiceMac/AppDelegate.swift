@@ -7,6 +7,7 @@ import PVEClient
 /// App entry: builds the menu and opens Proxmox SPICE sessions — either by signing
 /// in to a node and picking a guest (File ▸ Connect to Proxmox…), or from a `.vv`
 /// file (double-click, File ▸ Open, drag-and-drop) — spawning a window per session.
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     private var windowControllers: [SpiceWindowController] = []

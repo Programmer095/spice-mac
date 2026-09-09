@@ -71,16 +71,7 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
     /// Called to open a `.vv` file instead of signing in.
     var onOpenVVFile: (() -> Void)?
 
-    private let hostField = NSTextField()
-    private let portField = NSTextField()
-    private let authSelector = NSSegmentedControl(labels: ["API Token", "Username & Password"],
-                                                  trackingMode: .selectOne, target: nil, action: nil)
-    private let tokenIDField = NSTextField()
-    private let tokenSecretField = NSSecureTextField()
-    private let usernameField = NSTextField()
-    private let realmPopUp = NSPopUpButton()
-    private let passwordField = NSSecureTextField()
-    private let rememberCheckbox = NSButton(checkboxWithTitle: "Remember in Keychain", target: nil, action: nil)
+    private let form = PVEServerForm(includesLabel: false)
 
     private let connectButton = NSButton(title: "Sign In", target: nil, action: nil)
     private let openVVButton = NSButton(title: "Open .vv File…", target: nil, action: nil)
@@ -94,10 +85,7 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
     private let contextMenu = NSMenu()
     private let outlineView = NSOutlineView()
 
-    private var formGrid: NSGridView!
-    private var tokenRows: [NSGridRow] = []
-    private var passwordRows: [NSGridRow] = []
-    private var allFormRows: [NSGridRow] = []
+    private var formGrid: NSGridView { form.grid }
     private var isSignedIn = false
 
     private static let log = Logger(subsystem: "org.spicemac.SpiceMac", category: "proxmox")
@@ -196,71 +184,7 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
     // MARK: - Building
 
     private func buildUI() {
-        for field in [hostField, portField, tokenIDField, usernameField] {
-            field.isEditable = true
-            field.isBordered = true
-            field.bezelStyle = .roundedBezel
-        }
-        hostField.placeholderString = "proxmox.example.com"
-        portField.placeholderString = "8006"
-        portField.formatter = onlyDigitsFormatter()
-        tokenIDField.placeholderString = "root@pam!spicemac"
-        tokenSecretField.placeholderString = "token secret (UUID)"
-        usernameField.placeholderString = "root"
-        passwordField.placeholderString = "password"
-        realmPopUp.addItems(withTitles: ["pam", "pve"])
-
-        authSelector.target = self
-        authSelector.action = #selector(authKindChanged)
-        authSelector.selectedSegment = 0
-
-        connectButton.target = self
-        connectButton.action = #selector(connect(_:))
-        connectButton.keyEquivalent = "\r"
-        connectButton.bezelStyle = .rounded
-
-        rememberCheckbox.state = .on
-        statusLabel.textColor = .secondaryLabelColor
-        statusLabel.lineBreakMode = .byTruncatingTail
-        statusLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
-        spinner.style = .spinning
-        spinner.controlSize = .small
-        spinner.isDisplayedWhenStopped = false
-
-        let grid = NSGridView(views: [
-            [NSTextField(labelWithString: "Server:"), hostField,
-             NSTextField(labelWithString: "Port:"), portField],
-            [NSTextField(labelWithString: "Sign in with:"), authSelector],
-            [NSTextField(labelWithString: "Token ID:"), tokenIDField],
-            [NSTextField(labelWithString: "Secret:"), tokenSecretField],
-            [NSTextField(labelWithString: "Username:"), usernameField,
-             NSTextField(labelWithString: "Realm:"), realmPopUp],
-            [NSTextField(labelWithString: "Password:"), passwordField],
-            [NSGridCell.emptyContentView, rememberCheckbox],
-        ])
-        grid.column(at: 0).xPlacement = .trailing
-        grid.rowSpacing = 8
-        grid.columnSpacing = 8
-        // No fixed column width: this window shares a frame with consoles sized to their
-        // guests, so its content must stretch to whatever it is given rather than
-        // asserting a preferred width the frame then has to satisfy.
-        // Low hugging so fields stretch with the window; compression resistance stays
-        // HIGH so they cannot be squeezed away — lowering it collapses the window to a
-        // sliver, since nothing else resists.
-        for field in [hostField, tokenIDField, tokenSecretField, usernameField, passwordField] {
-            field.setContentHuggingPriority(.defaultLow, for: .horizontal)
-            field.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
-        }
-        hostField.widthAnchor.constraint(greaterThanOrEqualToConstant: 240).isActive = true
-        grid.mergeCells(inHorizontalRange: NSRange(location: 1, length: 3), verticalRange: NSRange(location: 1, length: 1))
-        grid.mergeCells(inHorizontalRange: NSRange(location: 1, length: 3), verticalRange: NSRange(location: 2, length: 1))
-        grid.mergeCells(inHorizontalRange: NSRange(location: 1, length: 3), verticalRange: NSRange(location: 3, length: 1))
-        grid.mergeCells(inHorizontalRange: NSRange(location: 1, length: 3), verticalRange: NSRange(location: 5, length: 1))
-        formGrid = grid
-        tokenRows = [grid.row(at: 2), grid.row(at: 3)]
-        passwordRows = [grid.row(at: 4), grid.row(at: 5)]
-        allFormRows = (0..<grid.numberOfRows).map { grid.row(at: $0) }
+        let grid = form.grid
 
         openVVButton.target = self
         openVVButton.action = #selector(openVVFile(_:))
@@ -377,7 +301,6 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
         constraints.append(listFloor)
         NSLayoutConstraint.activate(constraints)
 
-        authKindChanged()
     }
 
     private func configureOutline() {
@@ -415,86 +338,39 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
         outlineView.doubleAction = #selector(outlineDoubleClicked(_:))
     }
 
-    private func onlyDigitsFormatter() -> NumberFormatter {
-        let formatter = NumberFormatter()
-        formatter.numberStyle = .none
-        formatter.allowsFloats = false
-        formatter.minimum = 1
-        formatter.maximum = 65535
-        return formatter
-    }
-
     // MARK: - Profile
 
     private func loadProfile() {
         formProfile = PVEProfileStore.shared.profiles.first
         let profile = formProfile ?? PVEServerProfile()
         primaryProfileID = formProfile?.id
-        loadedSecret = nil
-        // Cleared unconditionally: reloading onto a server with nothing stored would
-        // otherwise leave the previous server's secret sitting in the field.
-        tokenSecretField.stringValue = ""
-        passwordField.stringValue = ""
-        hostField.stringValue = profile.host
-        portField.stringValue = String(profile.port)
-        tokenIDField.stringValue = profile.tokenID
-        usernameField.stringValue = profile.username
-        realmPopUp.selectItem(withTitle: profile.realm)
-        rememberCheckbox.state = profile.rememberSecret ? .on : .off
-        authSelector.selectedSegment = profile.authKind == .apiToken ? 0 : 1
-        authKindChanged()
-
-        if profile.rememberSecret, profile.isComplete,
-           let secret = PVEProfileStore.shared.secret(for: profile) {
-            loadedSecret = secret
-            if profile.authKind == .apiToken {
-                tokenSecretField.stringValue = secret
-            } else {
-                passwordField.stringValue = secret
-            }
-        }
+        // Read before the fields are populated: `apply` clears whichever secret field the
+        // auth kind does not use, so a server with nothing stored cannot inherit the last
+        // one's secret.
+        loadedSecret = profile.rememberSecret && profile.isComplete
+            ? PVEProfileStore.shared.secret(for: profile)
+            : nil
+        form.apply(profile, secret: loadedSecret ?? "")
+        // `apply` re-runs the auth-kind rule, which unhides the credential rows. Editing
+        // servers in the sheet reloads this form, and that must not pop the credentials
+        // back open over a signed-in session.
+        form.setRowsHidden(isSignedIn)
     }
 
     /// Starts from the stored first profile (if any) so its `id` and `label` survive
     /// a save — this form only edits that one slot, it must not fork a new identity
     /// for it on every Sign In.
     private func currentProfile() -> PVEServerProfile {
-        var profile = PVEProfileStore.shared.profiles.first ?? PVEServerProfile()
-        profile.host = hostField.stringValue.trimmingCharacters(in: .whitespaces)
-        profile.port = Int(portField.stringValue) ?? 8006
-        profile.authKind = authSelector.selectedSegment == 0 ? .apiToken : .password
-        profile.tokenID = tokenIDField.stringValue.trimmingCharacters(in: .whitespaces)
-        profile.username = usernameField.stringValue.trimmingCharacters(in: .whitespaces)
-        profile.realm = realmPopUp.titleOfSelectedItem ?? "pam"
-        profile.rememberSecret = rememberCheckbox.state == .on
-        return profile
-    }
-
-    private func currentSecret() -> String {
-        authSelector.selectedSegment == 0 ? tokenSecretField.stringValue : passwordField.stringValue
-    }
-
-    @objc private func authKindChanged() {
-        guard isSignedIn == false else { return }
-        let usingToken = authSelector.selectedSegment == 0
-        for row in tokenRows { row.isHidden = !usingToken }
-        for row in passwordRows { row.isHidden = usingToken }
+        form.profile(basedOn: PVEProfileStore.shared.profiles.first ?? PVEServerProfile())
     }
 
     /// Once signed in the credentials are just clutter above the thing the user came
     /// for, so fold them away and give the space to the guest tree.
     private func setSignedIn(_ signedIn: Bool) {
         isSignedIn = signedIn
-        if signedIn {
-            for row in allFormRows { row.isHidden = true }
-            connectButton.title = "Sign Out"
-            openVVButton.isHidden = true
-        } else {
-            for row in allFormRows { row.isHidden = false }
-            connectButton.title = "Sign In"
-            openVVButton.isHidden = false
-            authKindChanged()
-        }
+        form.setRowsHidden(signedIn)
+        connectButton.title = signedIn ? "Sign Out" : "Sign In"
+        openVVButton.isHidden = signedIn
     }
 
     /// Reflects the primary profile's fleet state onto the credentials form. A
@@ -537,7 +413,7 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
             return
         }
         let profile = currentProfile()
-        let secret = currentSecret()
+        let secret = form.secret
 
         guard profile.isComplete else {
             showStatus(profile.host.isEmpty
@@ -668,8 +544,19 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
     /// given window width and reports the frames the checks assert on. Drives layout
     /// only — nothing here reaches the network, so it runs without a server.
     func probePanelLayout(signedIn: Bool, contentWidth: CGFloat) -> PVEPanelLayout {
-        guard let window, let contentView = window.contentView else { return .zero }
         setSignedIn(signedIn)
+        return probePanelLayoutAsIs(contentWidth: contentWidth)
+    }
+
+    /// Test seam: reload the form from what is stored, the way a Manage Servers save
+    /// does. On its own, without the fleet change that would also re-evaluate whether
+    /// the server is still signed in.
+    func probeReloadForm() { loadProfile() }
+
+    /// Measures without touching the credential state — so a check can assert on what
+    /// some *other* call left behind, rather than on state the probe just re-imposed.
+    func probePanelLayoutAsIs(contentWidth: CGFloat) -> PVEPanelLayout {
+        guard let window, let contentView = window.contentView else { return .zero }
         window.setContentSize(NSSize(width: contentWidth, height: 580))
         contentView.layoutSubtreeIfNeeded()
         return PVEPanelLayout(content: contentView.bounds,

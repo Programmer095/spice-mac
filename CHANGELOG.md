@@ -129,6 +129,14 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **A removed server's empty-list diagnosis is discarded** rather than kept and
   rendered against whatever later took its id.
 
+- **Manage Servers no longer saves a server that can never sign in.** The sheet
+  wrote whatever was on screen, so a half-filled row — a host with no token ID, or
+  a token ID like `root` missing its realm and token name — went into the fleet and
+  then sat signed-out forever, because signing in silently does nothing for an
+  incomplete profile. The failure appeared nowhere near its cause. Done now names
+  the offending server and what it is missing, in the same words the connect form
+  has always used. Rows never filled in at all are still discarded quietly.
+
 - **Password sign-ins no longer break after about two hours.** The cached login
   ticket was never re-minted, so once it expired every refresh reported a
   credentials failure with a perfectly good password. A 401 on password auth now
