@@ -52,6 +52,14 @@ final class PVEManageServersController: NSObject, NSWindowDelegate, NSTableViewD
     /// itself checkable.
     var probeFormGrid: NSGridView { form.grid }
 
+    /// Field frames after a real layout pass in the sheet's own window — the only way to
+    /// see that Port actually got room rather than being squeezed to one digit.
+    func probeFieldFrames() -> (host: NSRect, port: NSRect) {
+        window.setContentSize(NSSize(width: 700, height: 460))
+        window.contentView?.layoutSubtreeIfNeeded()
+        return (form.hostField.frame, form.portField.frame)
+    }
+
     /// Renders the sheet's own content offscreen, the way the connect window does.
     func probeSnapshot(to directory: String, named name: String) -> String? {
         guard let contentView = window.contentView else { return nil }

@@ -238,8 +238,12 @@ enum UICheck {
     private static func checkServerForm(snapshotDirectory: String?) {
         let sheetForm = PVEServerForm()
 
-        expect(sheetForm.grid.numberOfRows == 8,
-               "the server form should have 8 rows, has \(sheetForm.grid.numberOfRows)")
+        expect(sheetForm.grid.numberOfRows == 9,
+               "the server form should have 9 rows, has \(sheetForm.grid.numberOfRows)")
+        // Port shares no row with Server: sharing squeezed it to a single visible digit.
+        expect(sheetForm.grid.cell(for: sheetForm.portField)?.row
+               !== sheetForm.grid.cell(for: sheetForm.hostField)?.row,
+               "Port must not share Server's row — it gets squeezed to nothing")
 
         // Row indices shift when the label row is present. Hand-maintained index lists
         // in two files is precisely what drifted, so check both shapes.
@@ -288,8 +292,19 @@ enum UICheck {
         // The sheet builds a window around this form. Constructing it exercises that
         // layout, which nothing else here reaches.
         let sheet = PVEManageServersController()
-        expect(sheet.probeFormGrid.numberOfRows == 8,
+        expect(sheet.probeFormGrid.numberOfRows == 9,
                "the sheet's window did not build the labelled form, got \(sheet.probeFormGrid.numberOfRows) rows")
+        // Port shared Server's row and was squeezed to a single visible digit: the host
+        // field carries a required 240pt minimum and hugs loosely, so it took every spare
+        // point and the port, which resists nothing, collapsed.
+        let frames = sheet.probeFieldFrames()
+        expect(frames.port.width >= 60,
+               "the Port field is \(Int(frames.port.width))pt wide — too narrow to read a port in")
+        expect(frames.host.width >= 240,
+               "the Server field is \(Int(frames.host.width))pt wide, expected at least 240")
+        expect(frames.port.minY != frames.host.minY,
+               "Port is still on Server's row, which is what squeezed it")
+
         if let directory = snapshotDirectory,
            let path = sheet.probeSnapshot(to: directory, named: "manage-servers.png") {
             print("  wrote \(path)")

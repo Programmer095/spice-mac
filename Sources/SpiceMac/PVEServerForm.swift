@@ -73,8 +73,12 @@ final class PVEServerForm {
     private func buildGrid() {
         var rows: [[NSView]] = []
         rows.append([NSTextField(labelWithString: "Label:"), labelField])
-        rows.append([NSTextField(labelWithString: "Server:"), hostField,
-                     NSTextField(labelWithString: "Port:"), portField])
+        // Port gets its own row rather than sharing Server's. Sharing squeezed it to a
+        // sliver showing one digit: the host field carries a required 240pt minimum and
+        // hugs loosely, so it takes every spare point in the row and the port — which
+        // resists nothing — collapses. A grid cannot wrap, so the fix is a second row.
+        rows.append([NSTextField(labelWithString: "Server:"), hostField])
+        rows.append([NSTextField(labelWithString: "Port:"), portField])
         rows.append([NSTextField(labelWithString: "Sign in with:"), authSelector])
         rows.append([NSTextField(labelWithString: "Token ID:"), tokenIDField])
         rows.append([NSTextField(labelWithString: "Secret:"), tokenSecretField])
@@ -98,13 +102,27 @@ final class PVEServerForm {
             field.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
         }
         hostField.widthAnchor.constraint(greaterThanOrEqualToConstant: 240).isActive = true
+        // A port is five digits; stretching it the width of the sheet says nothing.
+        portField.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        portField.widthAnchor.constraint(equalToConstant: 80).isActive = true
 
-        // Single-control rows span the whole width instead of sitting in column 1.
-        for row in [0, 2, 3, 4, 6] { merge(row: row) }
+        // Single-control rows span the whole width instead of sitting in column 1. Port
+        // is left out on purpose — it is fixed width and should sit at the left.
+        for view in [labelField, hostField, authSelector, tokenIDField, tokenSecretField,
+                     passwordField, rememberCheckbox] as [NSView] {
+            if let row = grid.cell(for: view)?.row { merge(row: grid.index(of: row)) }
+        }
 
-        tokenRows = [grid.row(at: 3), grid.row(at: 4)]
-        passwordRows = [grid.row(at: 5), grid.row(at: 6)]
+        // Looked up from the field, never by row number. Row indices shift whenever the
+        // form gains a row — which is exactly what moving Port down just did — and two
+        // hand-maintained index lists is how this drifted the last time.
+        tokenRows = gridRows(holding: [tokenIDField, tokenSecretField])
+        passwordRows = gridRows(holding: [usernameField, passwordField])
         allRows = (0..<grid.numberOfRows).map { grid.row(at: $0) }
+    }
+
+    private func gridRows(holding views: [NSView]) -> [NSGridRow] {
+        views.compactMap { grid.cell(for: $0)?.row }
     }
 
     private func merge(row: Int) {
