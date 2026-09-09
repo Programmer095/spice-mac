@@ -21,7 +21,7 @@ final class PVEManageServersController: NSObject, NSWindowDelegate, NSTableViewD
     /// Shared with the connect window's inline form, so the two surfaces cannot drift
     /// apart again. The label field is the one difference: the connect window only ever
     /// edits the first slot and keeps whatever name was given here.
-    private let form = PVEServerForm(includesLabel: true)
+    private let form = PVEServerForm()
 
     private var profiles: [PVEServerProfile] = []
     /// The secret in each field, keyed by profile id, kept in step with `profiles` as
@@ -51,6 +51,20 @@ final class PVEManageServersController: NSObject, NSWindowDelegate, NSTableViewD
     /// Test seam for `UICheck`: the form this sheet built, so constructing the sheet is
     /// itself checkable.
     var probeFormGrid: NSGridView { form.grid }
+
+    /// Renders the sheet's own content offscreen, the way the connect window does.
+    func probeSnapshot(to directory: String, named name: String) -> String? {
+        guard let contentView = window.contentView else { return nil }
+        window.setContentSize(NSSize(width: 700, height: 460))
+        contentView.layoutSubtreeIfNeeded()
+        guard let rep = contentView.bitmapImageRepForCachingDisplay(in: contentView.bounds) else { return nil }
+        contentView.cacheDisplay(in: contentView.bounds, to: rep)
+        guard let data = rep.representation(using: .png, properties: [:]) else { return nil }
+        let path = (directory as NSString).appendingPathComponent(name)
+        try? FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
+        try? data.write(to: URL(fileURLWithPath: path))
+        return path
+    }
 
     override init() {
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 420),

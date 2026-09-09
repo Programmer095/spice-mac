@@ -4,16 +4,11 @@ import PVEClient
 
 /// The credentials form for one Proxmox server.
 ///
-/// Two surfaces edit a server — the connect window's inline form for the first one, and
-/// the Manage Servers sheet for the rest — and they had grown two copies of the same
-/// fields, the same port formatter, the same auth-kind row hiding and the same
-/// field↔profile mapping. The copies had already drifted: the sheet never validated what
-/// it saved, so a half-filled row went into the fleet and then sat signed-out, because
-/// `signIn` returns silently on an incomplete profile.
-///
-/// One definition here, parameterised by the one real difference: the sheet names its
-/// servers, the connect form does not (it only ever edits the first slot, whose label is
-/// preserved from what is stored).
+/// Manage Servers is the only place a server is added or edited. The connect window used
+/// to carry a second copy of these fields for its first server, and the two drifted: the
+/// sheet never validated what it saved, so a half-filled row went into the fleet and then
+/// sat signed-out, because `signIn` returns silently on an incomplete profile. That copy
+/// is gone; this is what remains.
 @MainActor
 final class PVEServerForm {
 
@@ -42,11 +37,9 @@ final class PVEServerForm {
     private(set) var passwordRows: [NSGridRow] = []
     private(set) var allRows: [NSGridRow] = []
 
-    private let includesLabel: Bool
     private let actionProxy = ActionProxy()
 
-    init(includesLabel: Bool) {
-        self.includesLabel = includesLabel
+    init() {
         buildFields()
         buildGrid()
         authKindChanged()
@@ -79,9 +72,7 @@ final class PVEServerForm {
 
     private func buildGrid() {
         var rows: [[NSView]] = []
-        if includesLabel {
-            rows.append([NSTextField(labelWithString: "Label:"), labelField])
-        }
+        rows.append([NSTextField(labelWithString: "Label:"), labelField])
         rows.append([NSTextField(labelWithString: "Server:"), hostField,
                      NSTextField(labelWithString: "Port:"), portField])
         rows.append([NSTextField(labelWithString: "Sign in with:"), authSelector])
@@ -109,12 +100,10 @@ final class PVEServerForm {
         hostField.widthAnchor.constraint(greaterThanOrEqualToConstant: 240).isActive = true
 
         // Single-control rows span the whole width instead of sitting in column 1.
-        let offset = includesLabel ? 1 : 0
-        if includesLabel { merge(row: 0) }
-        for row in [1, 2, 3, 5] { merge(row: row + offset) }
+        for row in [0, 2, 3, 4, 6] { merge(row: row) }
 
-        tokenRows = [grid.row(at: 2 + offset), grid.row(at: 3 + offset)]
-        passwordRows = [grid.row(at: 4 + offset), grid.row(at: 5 + offset)]
+        tokenRows = [grid.row(at: 3), grid.row(at: 4)]
+        passwordRows = [grid.row(at: 5), grid.row(at: 6)]
         allRows = (0..<grid.numberOfRows).map { grid.row(at: $0) }
     }
 
@@ -157,11 +146,10 @@ final class PVEServerForm {
         authKind == .apiToken ? tokenSecretField.stringValue : passwordField.stringValue
     }
 
-    /// `base` carries forward everything the form does not edit — the profile's `id`,
-    /// and its `label` when this form has no label field.
+    /// `base` carries forward everything the form does not edit — the profile's `id`.
     func profile(basedOn base: PVEServerProfile) -> PVEServerProfile {
         var profile = base
-        if includesLabel { profile.label = labelField.stringValue.trimmingCharacters(in: .whitespaces) }
+        profile.label = labelField.stringValue.trimmingCharacters(in: .whitespaces)
         profile.host = hostField.stringValue.trimmingCharacters(in: .whitespaces)
         profile.port = Int(portField.stringValue) ?? 8006
         profile.authKind = authKind

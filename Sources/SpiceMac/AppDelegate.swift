@@ -35,6 +35,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         controller.onOpenVVFile = { [weak self] in
             self?.presentOpenPanelFromBrowser()
         }
+        controller.onManageServers = { [weak self] in
+            self?.manageServers(nil)
+        }
         createdBrowser = controller
         return controller
     }

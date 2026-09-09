@@ -6,11 +6,10 @@ import PVEClient
 struct PVEPanelLayout {
     var content: NSRect
     var root: NSRect
-    var grid: NSRect
     var list: NSRect
     var filter: NSRect
 
-    static let zero = PVEPanelLayout(content: .zero, root: .zero, grid: .zero, list: .zero, filter: .zero)
+    static let zero = PVEPanelLayout(content: .zero, root: .zero, list: .zero, filter: .zero)
 }
 
 /// Layout checks for the windows the package runners cannot reach.
@@ -35,9 +34,10 @@ enum UICheck {
         checkConnectPanel(snapshotDirectory: snapshotDirectory)
         checkGuestOverlay(snapshotDirectory: snapshotDirectory)
         checkActionBar(snapshotDirectory: snapshotDirectory)
-        checkServerForm()
+        checkServerForm(snapshotDirectory: snapshotDirectory)
         checkRevealConnectsWholeFleet()
-        checkFormFollowsSelection()
+        checkFleetHeader()
+        checkTreeFiltering()
         print("")
         for failure in failures { print("  FAIL \(failure)") }
         print("\(passed) passed, \(failures.count) failed")
@@ -47,61 +47,35 @@ enum UICheck {
     // MARK: - Checks
 
     /// The panel is a fixed-width column pinned to the top-left of whatever window it
-    /// finds itself in, and it must stay that way in *both* credential states. Signing
-    /// in hides every row of the credentials grid; a collapsed grid used to drag the
-    /// whole panel down with it, taking the filter field and the guest tree along.
+    /// finds itself in. It once collapsed to a sliver because the credentials grid, tied
+    /// to the panel at required priority, lost all its width when sign-in hid its rows.
+    /// That grid is gone now — but the invariant it broke is still the one worth holding.
     private static func checkConnectPanel(snapshotDirectory: String?) {
         let controller = PVEConnectWindowController(session: .shared)
-        let widths: [CGFloat] = [652, 1024, 1400, 1632]
-
-        for signedIn in [false, true] {
-            let state = signedIn ? "signed in" : "signed out"
-            for width in widths {
-                let layout = controller.probePanelLayout(signedIn: signedIn, contentWidth: width)
-                expect(layout.root.width == 620,
-                       "\(state) at \(Int(width))pt: panel is \(Int(layout.root.width))pt wide, expected 620")
-                expect(layout.list.width == layout.root.width,
-                       "\(state) at \(Int(width))pt: guest list is \(Int(layout.list.width))pt, expected to fill the \(Int(layout.root.width))pt panel")
-                expect(layout.filter.width > 400,
-                       "\(state) at \(Int(width))pt: filter field collapsed to \(Int(layout.filter.width))pt")
-                expect(layout.root.minX == 16 && layout.content.height - layout.root.maxY == 16,
-                       "\(state) at \(Int(width))pt: panel is not inset 16pt from the top-left, root=\(NSStringFromRect(layout.root))")
-            }
-
-            // The credentials form is the only part that folds away; the tree must not.
-            let folded = controller.probePanelLayout(signedIn: signedIn, contentWidth: 1400)
-            if signedIn {
-                expect(folded.grid.height == 0,
-                       "signed in: credentials grid is still \(Int(folded.grid.height))pt tall, expected to fold away")
-            } else {
-                expect(folded.grid.height > 0,
-                       "signed out: credentials grid collapsed to \(Int(folded.grid.height))pt")
-                expect(folded.grid.width == folded.root.width,
-                       "signed out: credentials grid is \(Int(folded.grid.width))pt, expected to fill the \(Int(folded.root.width))pt panel")
-            }
+        for width in [CGFloat(652), 1024, 1400, 1632] {
+            let layout = controller.probePanelLayout(contentWidth: width)
+            expect(layout.root.width == 620,
+                   "at \(Int(width))pt: panel is \(Int(layout.root.width))pt wide, expected 620")
+            expect(layout.list.width == layout.root.width,
+                   "at \(Int(width))pt: guest list is \(Int(layout.list.width))pt, expected to fill the panel")
+            expect(layout.filter.width > 400,
+                   "at \(Int(width))pt: filter field collapsed to \(Int(layout.filter.width))pt")
+            expect(layout.root.minX == 16 && layout.content.height - layout.root.maxY == 16,
+                   "at \(Int(width))pt: panel is not inset 16pt from the top-left, root=\(NSStringFromRect(layout.root))")
         }
 
-        // A Manage Servers save reloads this form. Reloading re-applies the auth-kind
-        // rule, which unhides credential rows — and an edit that leaves the server signed
-        // in (a rename, say) gets no fleet change to fold them back. The credentials must
-        // not pop open over a live session.
-        _ = controller.probePanelLayout(signedIn: true, contentWidth: 1400)
-        controller.probeReloadForm()
-        // As-is: asking the probe to re-assert "signed in" would re-hide the rows itself
-        // and the check would pass whatever the reload actually did.
-        let afterReload = controller.probePanelLayoutAsIs(contentWidth: 1400)
-        expect(afterReload.grid.height == 0,
-               "reloading the form while signed in re-opened the credentials rows (\(Int(afterReload.grid.height))pt)")
-        expect(afterReload.root.width == 620,
-               "reloading the form while signed in collapsed the panel to \(Int(afterReload.root.width))pt")
+        // Chrome a refactor can quietly drop: a stopped bar indicator left on screen reads
+        // as a broken progress bar, and an untruncated status line shoves the buttons off
+        // the row. Both were lost once when the credentials form was extracted.
+        expect(controller.probeSpinnerHiddenWhenStopped,
+               "the spinner must disappear when stopped, not sit there as a stopped bar")
+        expect(controller.probeSpinnerIsSpinningStyle, "the progress indicator must be the spinning style")
+        expect(controller.probeStatusTruncates, "the status line must truncate rather than shove the buttons off")
 
         guard let directory = snapshotDirectory else { return }
-        for signedIn in [false, true] {
-            _ = controller.probePanelLayout(signedIn: signedIn, contentWidth: 1400)
-            let name = signedIn ? "connect-signed-in-1400.png" : "connect-signed-out-1400.png"
-            if let path = controller.writePanelSnapshot(to: directory, named: name) {
-                print("  wrote \(path)")
-            }
+        _ = controller.probePanelLayout(contentWidth: 1400)
+        if let path = controller.writePanelSnapshot(to: directory, named: "connect-window.png") {
+            print("  wrote \(path)")
         }
     }
 
@@ -261,14 +235,11 @@ enum UICheck {
     /// The form both surfaces share. It exists because the connect window and the
     /// Manage Servers sheet had grown two copies that drifted — so the round trip and
     /// the auth-kind rule are checked here, once, rather than trusted twice.
-    private static func checkServerForm() {
-        let sheetForm = PVEServerForm(includesLabel: true)
-        let connectForm = PVEServerForm(includesLabel: false)
+    private static func checkServerForm(snapshotDirectory: String?) {
+        let sheetForm = PVEServerForm()
 
         expect(sheetForm.grid.numberOfRows == 8,
-               "the sheet's form should have 8 rows, has \(sheetForm.grid.numberOfRows)")
-        expect(connectForm.grid.numberOfRows == 7,
-               "the connect form has no Label row, so 7, has \(connectForm.grid.numberOfRows)")
+               "the server form should have 8 rows, has \(sheetForm.grid.numberOfRows)")
 
         // Row indices shift when the label row is present. Hand-maintained index lists
         // in two files is precisely what drifted, so check both shapes.
@@ -280,7 +251,7 @@ enum UICheck {
             form.grid.cell(for: view)?.row?.isHidden
         }
 
-        for (name, form) in [("sheet", sheetForm), ("connect", connectForm)] {
+        for (name, form) in [("sheet", sheetForm)] {
             form.authSelector.selectedSegment = 0
             form.refreshAuthKindRows()
             expect(rowHidden(form, holding: form.tokenIDField) == false,
@@ -319,6 +290,10 @@ enum UICheck {
         let sheet = PVEManageServersController()
         expect(sheet.probeFormGrid.numberOfRows == 8,
                "the sheet's window did not build the labelled form, got \(sheet.probeFormGrid.numberOfRows) rows")
+        if let directory = snapshotDirectory,
+           let path = sheet.probeSnapshot(to: directory, named: "manage-servers.png") {
+            print("  wrote \(path)")
+        }
 
         // A profile survives the trip through the fields unchanged.
         var profile = PVEServerProfile(label: "Rack B", host: "10.0.0.2", port: 8007)
@@ -331,14 +306,6 @@ enum UICheck {
         expect(round.tokenID == "root@pam!spicemac", "token ID lost in the round trip")
         expect(round.rememberSecret == false, "the Remember toggle lost its off state")
         expect(sheetForm.secret == "s3cret", "the typed secret is not readable back")
-
-        // The connect form has no label field, so the label must come from the base —
-        // otherwise editing the first server would blank the name given in the sheet.
-        connectForm.apply(profile, secret: "s3cret")
-        var base = profile
-        base.label = "Kept From Storage"
-        expect(connectForm.profile(basedOn: base).label == "Kept From Storage",
-               "the connect form overwrote a label it has no field for")
 
         // Switching auth kind must not carry a secret into the field it does not belong
         // to — that is how one server's credentials get saved against another.
@@ -387,52 +354,65 @@ enum UICheck {
                "the server that was already up must still be signed in")
     }
 
-    /// The credentials form used to be nailed to the fleet's first slot, so every other
-    /// server had no way to type its credentials at all. It now follows the selection —
-    /// which means unsaved edits have to survive the selection moving.
-    private static func checkFormFollowsSelection() {
+    /// Signing in is per-server, on the rows. What the window owes the user above them is
+    /// an at-a-glance answer to "is anything wrong", and somewhere obvious to add a server
+    /// when there are none.
+    private static func checkFleetHeader() {
         let alpha = server(label: "Alpha", host: "10.0.0.1")
         let beta = server(label: "Beta", host: "10.0.0.2")
         let coordinator = PVEFleetCoordinator(trustDelegate: nil,
                                               secretProvider: { _ in "secret" },
                                               loadGuests: { _ in [] })
         let session = PVEFleetSession(coordinator: coordinator)
-        session.setProfiles([alpha, beta])
         let controller = PVEConnectWindowController(session: session)
 
-        controller.probeRetargetForm(to: alpha.id)
-        expect(controller.probeFormHost == "10.0.0.1",
-               "targeting Alpha should show its host, showed “\(controller.probeFormHost)”")
-        controller.probeRetargetForm(to: beta.id)
-        expect(controller.probeFormHost == "10.0.0.2",
-               "targeting Beta should show its host, showed “\(controller.probeFormHost)”")
-        expect(controller.probeFormInstanceID == beta.id, "the form should now be editing Beta")
+        // Nothing configured: a blank tree with no hint is a dead end on a fresh install.
+        session.setProfiles([])
+        settle(until: { controller.probeEmptyStateVisible })
+        expect(controller.probeEmptyStateVisible,
+               "an empty fleet must offer somewhere to add a server, not just a blank list")
+        expect(controller.probeFleetSummary == nil, "no servers means nothing to summarise")
 
-        // Type against Beta, move away, come back. Losing this is the bug the Manage
-        // Servers sheet already had to solve when its shared fields move between rows.
-        controller.probeTypeIntoForm(host: "10.0.0.99", secret: "typed-for-beta")
-        controller.probeRetargetForm(to: alpha.id)
-        expect(controller.probeFormHost == "10.0.0.1",
-               "Beta's unsaved edit leaked into Alpha's fields: “\(controller.probeFormHost)”")
-        controller.probeRetargetForm(to: beta.id)
-        expect(controller.probeFormHost == "10.0.0.99",
-               "Beta's unsaved host edit was lost when the selection moved, got “\(controller.probeFormHost)”")
-        expect(controller.probeFormSecret == "typed-for-beta",
-               "Beta's unsaved secret was lost when the selection moved")
+        // One server: the row says everything, so no summary line.
+        session.setProfiles([alpha])
+        expect(controller.probeEmptyStateVisible == false, "a configured server must clear the empty state")
+        expect(controller.probeFleetSummary == nil,
+               "one server needs no fleet line, showed “\(controller.probeFleetSummary ?? "")”")
 
-        controller.setProfiles([alpha])
-        expect(controller.probeFormInstanceID == alpha.id,
-               "dropping the edited server should fall back to one that still exists")
+        // Two: the window must say what the *other* one is doing, or a line reading
+        // "Signed in to Alpha" looks healthy while Beta is unreachable.
+        session.setProfiles([alpha, beta])
+        expect(controller.probeSpinnerIsAnimating == false,
+               "nothing is signing in, so the spinner must not be running")
 
-        // Removing a server discards what was typed against it. If it comes back — the
-        // same id restored by a later save — it comes back as stored, not carrying an
-        // edit the user abandoned when they deleted it.
-        controller.setProfiles([alpha, beta])
-        controller.probeRetargetForm(to: beta.id)
-        expect(controller.probeFormHost == "10.0.0.2",
-               "a removed server's abandoned draft came back with it, showing “\(controller.probeFormHost)”")
-        expect(controller.probeFormSecret.isEmpty,
-               "a removed server's abandoned secret came back with it")
+        // Spinning while a sign-in is in flight, and — the part that was wrong — stopping
+        // again when it finishes. It was started and never stopped, so it span forever.
+        let slow = Flag(true)
+        let slowCoordinator = PVEFleetCoordinator(
+            trustDelegate: nil,
+            secretProvider: { _ in "secret" },
+            loadGuests: { _ in
+                while slow.value { try? await Task.sleep(nanoseconds: 20_000_000) }
+                return []
+            })
+        let slowSession = PVEFleetSession(coordinator: slowCoordinator)
+        let slowController = PVEConnectWindowController(session: slowSession)
+        slowSession.setProfiles([alpha, beta])
+        slowCoordinator.signInAll()
+        settle(until: { slowCoordinator.state.isAnySigningIn })
+        expect(slowController.probeSpinnerIsAnimating,
+               "a sign-in in flight must keep the spinner running")
+
+        slow.value = false
+        settle(until: { slowCoordinator.state.instances.allSatisfy(\.state.isSignedIn) })
+        settle(until: { slowController.probeSpinnerIsAnimating == false })
+        expect(slowController.probeSpinnerIsAnimating == false,
+               "the spinner must stop once every sign-in has finished — it used to spin forever")
+
+        expect(controller.probeFleetSummary != nil,
+               "two servers must get a fleet line")
+        expect(controller.probeFleetSummary?.contains("2 servers") == true,
+               "the fleet line should count the servers, said “\(controller.probeFleetSummary ?? "")”")
     }
 
     /// A box, so the guest loader can be flipped from outside the concurrent closure.
@@ -444,6 +424,54 @@ enum UICheck {
             get { lock.lock(); defer { lock.unlock() }; return stored }
             set { lock.lock(); defer { lock.unlock() }; stored = newValue }
         }
+    }
+
+    /// Filtering the tree by a server name has to show that server's guests. Showing the
+    /// row with nothing under it is worse than no match: the reason to search a site is to
+    /// see what is on it.
+    private static func checkTreeFiltering() {
+        let home = server(label: "Home", host: "10.0.0.1")
+        let rack = server(label: "Rack B", host: "10.0.0.2")
+        let byHost: [String: [PVEGuest]] = [
+            "10.0.0.1": [guest(100, "Netbird-router", "virtual1", "running"),
+                         guest(102, "OpnSense", "virtual1", "running")],
+            "10.0.0.2": [guest(200, "build-agent", "rack-1", "running")],
+        ]
+        let coordinator = PVEFleetCoordinator(trustDelegate: nil,
+                                              secretProvider: { _ in "secret" },
+                                              loadGuests: { byHost[$0.server.host] ?? [] })
+        let session = PVEFleetSession(coordinator: coordinator)
+        session.setProfiles([home, rack])
+        let controller = PVEConnectWindowController(session: session)
+        coordinator.signInAll()
+        settle(until: { coordinator.state.instances.allSatisfy(\.state.isSignedIn) })
+
+        let unfiltered = controller.probeVisibleTree(filter: "")
+        expect(unfiltered.count == 2 && unfiltered.map(\.guests.count) == [2, 1],
+               "unfiltered, the tree should show both servers and all their guests, got \(unfiltered)")
+
+        let byServerName = controller.probeVisibleTree(filter: "Home")
+        expect(byServerName.count == 1 && byServerName.first?.server == "Home",
+               "filtering by server name should keep just that server, got \(byServerName)")
+        expect(byServerName.first?.guests == ["Netbird-router", "OpnSense"],
+               "a server matched by name must still show its guests, got \(byServerName.first?.guests ?? [])")
+
+        let byGuest = controller.probeVisibleTree(filter: "opn")
+        expect(byGuest.count == 1 && byGuest.first?.guests == ["OpnSense"],
+               "filtering by guest name should narrow to that guest, got \(byGuest)")
+
+        let byVMID = controller.probeVisibleTree(filter: "200")
+        expect(byVMID.first?.guests == ["build-agent"], "filtering by VMID failed, got \(byVMID)")
+
+        expect(controller.probeVisibleTree(filter: "zzz").isEmpty,
+               "a query matching nothing must show nothing")
+
+        // The picker in a console shows the same fleet through a flatter shape; they read
+        // the same rule, so they must agree.
+        let overlay = PVEGuestOverlay(session: session)
+        overlay.setFilter("Home")
+        expect(overlay.visibleMatches.map(\.guest.name) == ["Netbird-router", "OpnSense"],
+               "the console picker disagreed with the tree, got \(overlay.visibleMatches.map(\.guest.name))")
     }
 
     private static func server(label: String, host: String) -> PVEServerProfile {

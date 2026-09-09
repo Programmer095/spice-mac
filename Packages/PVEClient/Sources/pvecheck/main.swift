@@ -1260,4 +1260,110 @@ t.test("signing in the fleet leaves an already signed-in server alone") {
     t.expectEqual(after.value, 1)
 }
 
+// MARK: - Saying something about the fleet, not just one server
+
+func fleet(_ states: [(String, PVEInstanceState)]) -> PVEFleetState {
+    PVEFleetState(instances: states.map { name, state in
+        PVEInstanceSnapshot(profile: PVEServerProfile(label: name, host: "h"), state: state)
+    })
+}
+
+t.test("a single server needs no fleet summary — the line above already says it") {
+    t.expectEqual(fleet([("Home", .signedIn([]))]).connectionSummary, nil)
+    t.expectEqual(fleet([]).connectionSummary, nil)
+}
+
+t.test("a fleet that is all up says so") {
+    t.expectEqual(fleet([("A", .signedIn([])), ("B", .signedIn([]))]).connectionSummary,
+                  "All 2 servers connected.")
+}
+
+t.test("a failed server is named while it is the only one failing") {
+    // The case the summary exists for: the status line can read "Signed in to A" and
+    // look entirely healthy while B is unreachable, because B's failure lives only on
+    // B's own row further down the tree.
+    t.expectEqual(fleet([("A", .signedIn([])), ("B", .failed(.unauthorized))]).connectionSummary,
+                  "1 of 2 servers connected. B failed.")
+}
+
+t.test("several failures are counted rather than listed") {
+    let summary = fleet([("A", .signedIn([])),
+                         ("B", .failed(.unauthorized)),
+                         ("C", .failed(.invalidServer))]).connectionSummary
+    t.expectEqual(summary, "1 of 3 servers connected. 2 failed.")
+}
+
+t.test("a sign-in still in flight is reported as in flight, not as a failure") {
+    t.expectEqual(fleet([("A", .signedIn([])), ("B", .signingIn)]).connectionSummary,
+                  "1 of 2 servers connected. 1 still signing in…")
+}
+
+t.test("the spinner belongs to the fleet, not to one server") {
+    t.expect(fleet([("A", .signedIn([])), ("B", .signingIn)]).isAnySigningIn,
+             "a server still signing in must keep the spinner going")
+    t.expect(fleet([("A", .signedIn([])), ("B", .failed(.unauthorized))]).isAnySigningIn == false,
+             "nothing in flight means nothing to spin for")
+}
+
+// MARK: - Filtering a fleet by server name
+
+func fleetWithGuests() -> PVEFleetState {
+    PVEFleetState(instances: [
+        PVEInstanceSnapshot(profile: PVEServerProfile(label: "Home", host: "10.0.0.1"),
+                            state: .signedIn([PVEGuest(vmid: 100, name: "Netbird-router", node: "virtual1", status: "running", kind: .qemu),
+                                              PVEGuest(vmid: 102, name: "OpnSense", node: "virtual1", status: "running", kind: .qemu)])),
+        PVEInstanceSnapshot(profile: PVEServerProfile(label: "Rack B", host: "10.0.0.2"),
+                            state: .signedIn([PVEGuest(vmid: 200, name: "build-agent", node: "rack-1", status: "running", kind: .qemu)])),
+    ])
+}
+
+t.test("searching a server name shows that server's guests, not an empty row") {
+    // The whole point of filtering to a site is to see what is on it. Returning the row
+    // with nothing under it is worse than no match at all.
+    let matches = fleetWithGuests().instances(matching: "Home")
+    t.expectEqual(matches.count, 1)
+    t.expectEqual(matches.first?.guests.count, 2)
+    t.expectEqual(matches.first?.guests.map(\.name), ["Netbird-router", "OpnSense"])
+}
+
+t.test("searching a server's host does the same as its name") {
+    let matches = fleetWithGuests().instances(matching: "10.0.0.2")
+    t.expectEqual(matches.count, 1)
+    t.expectEqual(matches.first?.guests.map(\.name), ["build-agent"])
+}
+
+t.test("searching a guest name narrows to that guest, keeping its server") {
+    let matches = fleetWithGuests().instances(matching: "opn")
+    t.expectEqual(matches.count, 1)
+    t.expectEqual(matches.first?.instance.profile.label, "Home")
+    t.expectEqual(matches.first?.guests.map(\.name), ["OpnSense"])
+}
+
+t.test("a query matching nothing matches nothing") {
+    t.expect(fleetWithGuests().instances(matching: "zzz").isEmpty,
+             "an unmatched query must not keep servers around")
+}
+
+t.test("an empty query shows the whole fleet") {
+    let matches = fleetWithGuests().instances(matching: "  ")
+    t.expectEqual(matches.count, 2)
+    t.expectEqual(matches.map { $0.guests.count }, [2, 1])
+}
+
+t.test("a matching server with no guests still shows") {
+    // A server that failed, or is still signing in, has no guests to list — hiding it
+    // would hide the very thing that was searched for.
+    let state = PVEFleetState(instances: [
+        PVEInstanceSnapshot(profile: PVEServerProfile(label: "Rack B", host: "10.0.0.2"),
+                            state: .failed(.unauthorized)),
+    ])
+    t.expectEqual(state.instances(matching: "rack").count, 1)
+    t.expectEqual(state.instances(matching: "rack").first?.guests.count, 0)
+}
+
+t.test("the flat picker and the tree agree, because they share the rule") {
+    let flat = fleetWithGuests().guests(matching: "Home")
+    t.expectEqual(flat.map(\.guest.name), ["Netbird-router", "OpnSense"])
+}
+
 t.finishAndExit()

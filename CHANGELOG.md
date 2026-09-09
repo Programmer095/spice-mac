@@ -129,13 +129,24 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **A removed server's empty-list diagnosis is discarded** rather than kept and
   rendered against whatever later took its id.
 
-- **The credentials form follows the tree selection.** It was nailed to the first
-  configured server, so in a fleet the second and third could only be signed in by
-  right-clicking their row, and their credentials could not be typed there at all.
-  Selecting anything under a server now points the form at it — its fields, its
-  Sign In / Sign Out, its status. Unsaved edits are kept per server, so moving the
-  selection mid-edit does not discard what was typed, and nothing reaches the
-  Keychain until a sign-in with those credentials actually succeeds.
+
+- **Signing in moved out of the connect window's form and onto the server rows.**
+  The inline credentials form was a single-server surface bolted above a fleet: it
+  folded itself away on sign-in, could not add a server at all, and duplicated the
+  fields Manage Servers owns. Adding and editing a server is now one place —
+  Manage Servers, reachable from a button in the window, ⌘, or the **Add a
+  Server…** button shown when no server is configured. Signing one in is a row
+  action, and a server with no stored secret is asked for one, as before.
+
+- **A fleet status line.** With several servers the window said only what one of
+  them was doing, so it could read "Signed in to Home" while another was
+  unreachable — that failure showed only on its own row further down. It now also
+  says "All 2 servers connected." or "1 of 2 servers connected. Rack B failed."
+
+- **Searching a server name shows that server's guests.** Filtering the tree to a
+  site matched the site but then narrowed its guests to the ones matching the same
+  text — none of them — so it produced the row with nothing under it. The tree and
+  the console picker now share one rule, which is why only one of them was wrong.
 
 - **Signing in no longer stops at the first server that works.** A server that had
   failed was never retried, and revealing the browser signed in the fleet only
