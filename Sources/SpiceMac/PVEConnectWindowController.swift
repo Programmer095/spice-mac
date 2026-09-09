@@ -364,9 +364,19 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
             panelStretch,
         ]
         // Rows follow the panel, not the window, so hiding the form cannot collapse them.
-        for view in [grid as NSView, actionRow, separator, listHeader, scrollView, footer] {
+        for view in [actionRow as NSView, separator, listHeader, scrollView, footer] {
             constraints.append(view.widthAnchor.constraint(equalTo: root.widthAnchor))
         }
+        // The grid is the one row whose own width legitimately falls to zero: signing in
+        // hides every credentials row, and an all-rows-hidden NSGridView has no content
+        // left to be wide. Tying that to the panel at required priority lets the collapse
+        // propagate outwards — it outranks `panelWidth`'s 999 and drags the panel down to
+        // a sliver, taking the filter field and the guest tree with it. Nothing is
+        // unsatisfiable, so Auto Layout never reports it. Below 999 the grid still
+        // stretches to fill the panel but can no longer shrink it.
+        let gridWidth = grid.widthAnchor.constraint(equalTo: root.widthAnchor)
+        gridWidth.priority = .defaultHigh
+        constraints.append(gridWidth)
         let listFloor = scrollView.heightAnchor.constraint(greaterThanOrEqualToConstant: 160)
         listFloor.priority = .defaultHigh               // shrinks rather than forcing the window taller
         constraints.append(listFloor)
