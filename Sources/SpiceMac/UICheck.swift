@@ -37,6 +37,7 @@ enum UICheck {
         checkServerForm(snapshotDirectory: snapshotDirectory)
         checkRevealConnectsWholeFleet()
         checkFleetHeader()
+        checkWindowMenu()
         checkTreeFiltering()
         print("")
         for failure in failures { print("  FAIL \(failure)") }
@@ -438,6 +439,39 @@ enum UICheck {
         var value: Bool {
             get { lock.lock(); defer { lock.unlock() }; return stored }
             set { lock.lock(); defer { lock.unlock() }; stored = newValue }
+        }
+    }
+
+    /// A console dragged out of the tab group has to have a way back. AppKit injects the
+    /// window list into a hand-built Window menu but not the tab commands, and with one
+    /// window left there is no tab bar to drag onto — so without these the pop-out is
+    /// one-way.
+    private static func checkWindowMenu() {
+        let menu = MainMenu.build()
+        guard let windowMenu = menu.items.compactMap(\.submenu).first(where: { $0.title == "Window" }) else {
+            expect(false, "there is no Window menu at all")
+            return
+        }
+        let actions = Set(windowMenu.items.compactMap(\.action))
+        let required: [(String, Selector)] = [
+            ("Merge All Windows", #selector(NSWindow.mergeAllWindows(_:))),
+            ("Move Tab to New Window", #selector(NSWindow.moveTabToNewWindow(_:))),
+            ("Show Tab Bar", #selector(NSWindow.toggleTabBar(_:))),
+            ("Show All Tabs", #selector(NSWindow.toggleTabOverview(_:))),
+            ("Show Next Tab", #selector(NSWindow.selectNextTab(_:))),
+            ("Show Previous Tab", #selector(NSWindow.selectPreviousTab(_:))),
+        ]
+        for (title, selector) in required {
+            expect(actions.contains(selector), "the Window menu is missing “\(title)”")
+        }
+
+        // The README promises ⌘⇧[ / ⌘⇧] for moving between consoles; those bindings live
+        // on these items and nowhere else.
+        for (key, selector) in [("[", #selector(NSWindow.selectPreviousTab(_:))),
+                                ("]", #selector(NSWindow.selectNextTab(_:)))] {
+            let item = windowMenu.items.first { $0.action == selector }
+            expect(item?.keyEquivalent == key && item?.keyEquivalentModifierMask == [.command, .shift],
+                   "tab switching should be ⌘⇧\(key), got \(item?.keyEquivalent ?? "nothing")")
         }
     }
 

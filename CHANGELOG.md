@@ -129,6 +129,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **A removed server's empty-list diagnosis is discarded** rather than kept and
   rendered against whatever later took its id.
 
+- **A console dragged out of the tab group can be put back.** The Window menu had
+  no Merge All Windows, Move Tab to New Window, Show Tab Bar or Show All Tabs —
+  AppKit adds the window list to a hand-built Window menu but not those — so a
+  popped-out console was one-way, with no tab bar left to drag onto. The ⌘⇧[ /
+  ⌘⇧] tab shortcuts come from the same items and now work.
+
 - **The Port field is no longer squeezed to a single digit.** It shared a row with
   Server, whose field carries a required minimum width and takes every spare
   point; a grid cannot wrap, so Port now has its own row.

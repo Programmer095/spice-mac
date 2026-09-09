@@ -124,6 +124,37 @@ enum MainMenu {
         windowItem.submenu = windowMenu
         windowMenu.addItem(withTitle: "Minimize",
                            action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+
+        // The standard tab commands, added by hand. AppKit injects the *window list* into
+        // a hand-built Window menu but not these, so without them a console dragged out
+        // of the group had no way back: merging is a menu command, and with one window
+        // left there is no tab bar to drag onto either. These also carry the ⌘⇧[ / ⌘⇧]
+        // bindings the README promises for moving between tabs.
+        windowMenu.addItem(.separator())
+        windowMenu.addItem(withTitle: "Show Tab Bar",
+                           action: #selector(NSWindow.toggleTabBar(_:)), keyEquivalent: "")
+        let showAllTabs = NSMenuItem(title: "Show All Tabs",
+                                     action: #selector(NSWindow.toggleTabOverview(_:)),
+                                     keyEquivalent: "\\")
+        showAllTabs.keyEquivalentModifierMask = [.command, .shift]
+        windowMenu.addItem(showAllTabs)
+
+        let previousTab = NSMenuItem(title: "Show Previous Tab",
+                                     action: #selector(NSWindow.selectPreviousTab(_:)),
+                                     keyEquivalent: "[")
+        previousTab.keyEquivalentModifierMask = [.command, .shift]
+        windowMenu.addItem(previousTab)
+        let nextTab = NSMenuItem(title: "Show Next Tab",
+                                 action: #selector(NSWindow.selectNextTab(_:)),
+                                 keyEquivalent: "]")
+        nextTab.keyEquivalentModifierMask = [.command, .shift]
+        windowMenu.addItem(nextTab)
+
+        windowMenu.addItem(withTitle: "Move Tab to New Window",
+                           action: #selector(NSWindow.moveTabToNewWindow(_:)), keyEquivalent: "")
+        windowMenu.addItem(withTitle: "Merge All Windows",
+                           action: #selector(NSWindow.mergeAllWindows(_:)), keyEquivalent: "")
+
         NSApp.windowsMenu = windowMenu
 
         return mainMenu
