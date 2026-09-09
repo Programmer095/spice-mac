@@ -85,20 +85,25 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
 
     private static let log = Logger(subsystem: "org.spicemac.SpiceMac", category: "proxmox")
 
-    /// The secret as loaded from the Keychain. Rewriting an unchanged secret costs a
-    /// second authorization prompt for no benefit, so persist only real changes.
-    private var loadedSecret: String?
+    /// The secret last read from the Keychain, per server. Rewriting an unchanged secret
+    /// costs a second authorization prompt for no benefit, so persist only real changes.
+    private var loadedSecrets: [UUID: String] = [:]
     /// The stored profile the fields were last populated from, so a fleet change can
     /// be told apart from one this form already reflects.
     private var formProfile: PVEServerProfile?
-    /// The profile the credentials form above edits — always the fleet's first slot.
-    /// Everything else in the window (the tree, sign-in-all-on-reveal) is driven by
-    /// the coordinator across every configured server, not just this one.
-    private var primaryProfileID: UUID?
+    /// The server the credentials form edits: whichever the tree has selected, falling
+    /// back to the first configured one. The form used to be nailed to slot zero, which
+    /// left every other server in a fleet with no way to type its credentials at all.
+    private var formInstanceID: UUID?
+    /// Unsaved edits, per server, so moving the selection does not throw away what was
+    /// typed. Nothing here reaches disk: the Keychain is only written once a sign-in
+    /// with these credentials actually succeeds.
+    private var formDrafts: [UUID: PVEServerProfile] = [:]
+    private var formDraftSecrets: [UUID: String] = [:]
     /// Set by `connect()` while a form-driven sign-in is in flight, so the coordinator's
     /// eventual success/failure can decide whether to persist — a mistyped secret must
     /// never overwrite a working one in the Keychain.
-    private var pendingPrimaryPersist: (id: UUID, profile: PVEServerProfile, secret: String)?
+    private var pendingFormPersist: (id: UUID, profile: PVEServerProfile, secret: String)?
 
     /// Row wrappers, reused across reloads by id so `NSOutlineView` keeps expansion
     /// and selection state stable even though the coordinator hands us fresh struct
@@ -148,6 +153,8 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
         super.init(window: window)
         window.delegate = self
         buildUI()
+        // Start on the first configured server; the tree's selection moves it from there.
+        formInstanceID = PVEProfileStore.shared.profiles.first?.id
         loadProfile()
         fleetObservation = session.observe { [weak self] state in self?.handleFleetStateChanged(state) }
     }
@@ -157,11 +164,17 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
     /// Forwarded from the Manage Servers sheet.
     func setProfiles(_ profiles: [PVEServerProfile]) {
         session.setProfiles(profiles)
-        // The credentials form is a view onto the fleet's first slot. If the sheet
-        // changed that slot, the fields — and `loadedSecret` — still hold pre-sheet
-        // values, and the next Sign In would write them straight back over the edit.
-        if profiles.first != formProfile { loadProfile() }
-        primaryProfileID = profiles.first?.id
+        // Drop drafts for servers the sheet removed, or they would be re-applied to
+        // whatever later reuses the id.
+        let live = Set(profiles.map(\.id))
+        formDrafts = formDrafts.filter { live.contains($0.key) }
+        formDraftSecrets = formDraftSecrets.filter { live.contains($0.key) }
+        loadedSecrets = loadedSecrets.filter { live.contains($0.key) }
+        // Keep editing the same server when it survived the edit. The fields still hold
+        // pre-sheet values, so reload them or the next Sign In writes them back over
+        // whatever the sheet just changed.
+        let target = formInstanceID.flatMap { live.contains($0) ? $0 : nil } ?? profiles.first?.id
+        retargetForm(to: target, bankingCurrentEdits: false)
     }
 
     /// Show the window, then bring the tree up to date: refresh the instance behind
@@ -352,27 +365,63 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
     // MARK: - Profile
 
     private func loadProfile() {
-        formProfile = PVEProfileStore.shared.profiles.first
-        let profile = formProfile ?? PVEServerProfile()
-        primaryProfileID = formProfile?.id
+        let stored = fleetProfile(formInstanceID)
+        formProfile = stored
+        let profile = formDrafts[formInstanceID ?? UUID()] ?? stored ?? PVEServerProfile()
+
         // Read before the fields are populated: `apply` clears whichever secret field the
         // auth kind does not use, so a server with nothing stored cannot inherit the last
         // one's secret.
-        loadedSecret = profile.rememberSecret && profile.isComplete
-            ? PVEProfileStore.shared.secret(for: profile)
-            : nil
-        form.apply(profile, secret: loadedSecret ?? "")
+        let secret: String
+        if let id = formInstanceID, let draft = formDraftSecrets[id] {
+            secret = draft
+        } else if let stored, stored.rememberSecret, stored.isComplete,
+                  let keychain = PVEProfileStore.shared.secret(for: stored) {
+            if let id = formInstanceID { loadedSecrets[id] = keychain }
+            secret = keychain
+        } else {
+            secret = ""
+        }
+        form.apply(profile, secret: secret)
         // `apply` re-runs the auth-kind rule, which unhides the credential rows. Editing
         // servers in the sheet reloads this form, and that must not pop the credentials
         // back open over a signed-in session.
         form.setRowsHidden(isSignedIn)
     }
 
+    /// The fleet's view of a server, not the store's. The coordinator is what the tree
+    /// renders and what a Manage Servers save updates first, so reading it keeps the
+    /// form and the row beside it describing the same thing.
+    private func fleetProfile(_ id: UUID?) -> PVEServerProfile? {
+        guard let id else { return nil }
+        return coordinator.state.instance(id)?.profile
+    }
+
+    /// Banks whatever is on screen against the server it belongs to, so moving the
+    /// selection mid-edit does not silently discard it — the same problem the Manage
+    /// Servers sheet solves when its shared fields move between rows.
+    private func bankFormEdits() {
+        guard let id = formInstanceID else { return }
+        formDrafts[id] = form.profile(basedOn: fleetProfile(id) ?? PVEServerProfile())
+        formDraftSecrets[id] = form.secret
+    }
+
+    /// Points the form at another server. `bankingCurrentEdits` is false only when the
+    /// fields no longer describe the server they were loaded from — after a Manage
+    /// Servers save, where banking would resurrect pre-sheet values.
+    private func retargetForm(to id: UUID?, bankingCurrentEdits: Bool = true) {
+        guard id != formInstanceID || bankingCurrentEdits == false else { return }
+        if bankingCurrentEdits { bankFormEdits() }
+        formInstanceID = id
+        loadProfile()
+        updateFormState()
+    }
+
     /// Starts from the stored first profile (if any) so its `id` and `label` survive
     /// a save — this form only edits that one slot, it must not fork a new identity
     /// for it on every Sign In.
     private func currentProfile() -> PVEServerProfile {
-        form.profile(basedOn: PVEProfileStore.shared.profiles.first ?? PVEServerProfile())
+        form.profile(basedOn: fleetProfile(formInstanceID) ?? PVEServerProfile())
     }
 
     /// Once signed in the credentials are just clutter above the thing the user came
@@ -387,8 +436,8 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
     /// Reflects the primary profile's fleet state onto the credentials form. A
     /// sign-in failure shows on the form (this is the one server the user is looking
     /// straight at) — every other server's failure shows on its own tree row instead.
-    private func updatePrimaryFormState() {
-        guard let id = primaryProfileID, let instance = coordinator.state.instance(id) else {
+    private func updateFormState() {
+        guard let id = formInstanceID, let instance = coordinator.state.instance(id) else {
             setBusy(false, message: nil)
             setSignedIn(false)
             return
@@ -399,11 +448,11 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
             setSignedIn(false)
             showStatus("", isError: false)
         case .signingIn:
-            setBusy(true, message: "Signing in to \(instance.profile.host)…")
+            setBusy(true, message: "Signing in to \(instance.profile.displayName)…")
         case .signedIn:
             setBusy(false, message: nil)
             setSignedIn(true)
-            showStatus("Signed in to \(instance.profile.host) as \(instance.profile.credentials(secret: "").displayUser).",
+            showStatus("Signed in to \(instance.profile.displayName) as \(instance.profile.credentials(secret: "").displayUser).",
                        isError: false)
         case .failed(let error):
             setBusy(false, message: nil)
@@ -420,7 +469,7 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
 
     @objc private func connect(_ sender: Any?) {
         if isSignedIn {
-            if let id = primaryProfileID { coordinator.signOut(id) }
+            if let id = formInstanceID { coordinator.signOut(id) }
             return
         }
         let profile = currentProfile()
@@ -438,29 +487,34 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
             return
         }
 
-        primaryProfileID = profile.id
-        pendingPrimaryPersist = (id: profile.id, profile: profile, secret: secret)
+        formInstanceID = profile.id
+        pendingFormPersist = (id: profile.id, profile: profile, secret: secret)
         coordinator.setProfiles(updatedProfiles(with: profile))
         coordinator.signIn(profile.id, usingSecret: secret)
     }
 
-    /// The stored profile list with `profile` in the first slot, without writing it to
+    /// The stored profile list with `profile` in its own slot, without writing it to
     /// disk — used to tell the coordinator about an edit before it's confirmed to work.
+    /// Matched by id: the form no longer always edits the first server, and writing to
+    /// slot zero would overwrite a different one.
     private func updatedProfiles(with profile: PVEServerProfile) -> [PVEServerProfile] {
         var profiles = PVEProfileStore.shared.profiles
-        if profiles.isEmpty {
-            profiles = [profile]
+        if let index = profiles.firstIndex(where: { $0.id == profile.id }) {
+            profiles[index] = profile
         } else {
-            profiles[0] = profile
+            profiles.append(profile)
         }
         return profiles
     }
 
     private func persist(profile: PVEServerProfile, secret: String) {
-        let previous = PVEProfileStore.shared.profiles.first
+        let previous = PVEProfileStore.shared.profiles.first { $0.id == profile.id }
         let updated = updatedProfiles(with: profile)
         PVEProfileStore.shared.profiles = updated
-        formProfile = updated.first
+        formProfile = updated.first { $0.id == profile.id }
+        // The draft is now what is stored, so stop shadowing it.
+        formDrafts[profile.id] = nil
+        formDraftSecrets[profile.id] = nil
 
         // Editing the host, port or token moves the Keychain account and the pinned
         // certificate along with it. Left behind, the old item is an orphan nothing can
@@ -481,14 +535,14 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
 
         guard profile.rememberSecret else {
             PVEKeychain.delete(account: profile.keychainAccount)
-            loadedSecret = nil
+            loadedSecrets[profile.id] = nil
             return
         }
         // Rewriting an unchanged secret costs a second Keychain authorization prompt —
         // but a moved account has nothing stored under its new name yet.
-        guard accountMoved || secret != loadedSecret else { return }
+        guard accountMoved || secret != loadedSecrets[profile.id] else { return }
         PVEProfileStore.shared.setSecret(secret, for: profile)
-        loadedSecret = secret
+        loadedSecrets[profile.id] = secret
     }
 
     @objc private func refresh(_ sender: Any?) {
@@ -559,6 +613,16 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
         return probePanelLayoutAsIs(contentWidth: contentWidth)
     }
 
+    /// Test seams for `UICheck`: point the form at a server and read back what it shows.
+    func probeRetargetForm(to id: UUID?) { retargetForm(to: id) }
+    var probeFormInstanceID: UUID? { formInstanceID }
+    var probeFormHost: String { form.hostField.stringValue }
+    var probeFormSecret: String { form.secret }
+    func probeTypeIntoForm(host: String, secret: String) {
+        form.hostField.stringValue = host
+        form.tokenSecretField.stringValue = secret
+    }
+
     /// Test seam: reload the form from what is stored, the way a Manage Servers save
     /// does. On its own, without the fleet change that would also re-evaluate whether
     /// the server is still signed in.
@@ -617,20 +681,20 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
         }
         refreshTree()
         resolvePendingPrimaryPersist(state)
-        updatePrimaryFormState()
+        updateFormState()
         diagnoseEmptyInstancesIfNeeded(state)
     }
 
     /// Commits the form's typed secret to the Keychain only once the coordinator
     /// confirms it actually works; a failure leaves whatever was already stored alone.
     private func resolvePendingPrimaryPersist(_ state: PVEFleetState) {
-        guard let pending = pendingPrimaryPersist, let instance = state.instance(pending.id) else { return }
+        guard let pending = pendingFormPersist, let instance = state.instance(pending.id) else { return }
         switch instance.state {
         case .signedIn:
             persist(profile: pending.profile, secret: pending.secret)
-            pendingPrimaryPersist = nil
+            pendingFormPersist = nil
         case .failed:
-            pendingPrimaryPersist = nil
+            pendingFormPersist = nil
         case .signedOut, .signingIn:
             break
         }
@@ -1052,6 +1116,10 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
     }
 
     func outlineViewSelectionDidChange(_ notification: Notification) {
+        // Selecting anything under a server points the form at it, so the credentials
+        // above always belong to the row being looked at. Nothing selected keeps the
+        // current target rather than blanking a form mid-edit.
+        if let id = currentSelectionInstanceID() { retargetForm(to: id) }
         updateActionAvailability()
         rebuildFooterPowerMenu()
     }

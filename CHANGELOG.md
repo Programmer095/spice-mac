@@ -129,6 +129,19 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **A removed server's empty-list diagnosis is discarded** rather than kept and
   rendered against whatever later took its id.
 
+- **The credentials form follows the tree selection.** It was nailed to the first
+  configured server, so in a fleet the second and third could only be signed in by
+  right-clicking their row, and their credentials could not be typed there at all.
+  Selecting anything under a server now points the form at it — its fields, its
+  Sign In / Sign Out, its status. Unsaved edits are kept per server, so moving the
+  selection mid-edit does not discard what was typed, and nothing reaches the
+  Keychain until a sign-in with those credentials actually succeeds.
+
+- **Signing in no longer stops at the first server that works.** A server that had
+  failed was never retried, and revealing the browser signed in the fleet only
+  while nothing was signed in yet — so once one server came up, the rest could
+  never join it, and the tree gave no reason why.
+
 - **Manage Servers no longer saves a server that can never sign in.** The sheet
   wrote whatever was on screen, so a half-filled row — a host with no token ID, or
   a token ID like `root` missing its realm and token name — went into the fleet and

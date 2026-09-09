@@ -37,6 +37,7 @@ enum UICheck {
         checkActionBar(snapshotDirectory: snapshotDirectory)
         checkServerForm()
         checkRevealConnectsWholeFleet()
+        checkFormFollowsSelection()
         print("")
         for failure in failures { print("  FAIL \(failure)") }
         print("\(passed) passed, \(failures.count) failed")
@@ -384,6 +385,54 @@ enum UICheck {
                "revealing the browser left a recovered server disconnected — the fleet stays part-connected")
         expect(coordinator.state.instance(up.id)?.state.isSignedIn == true,
                "the server that was already up must still be signed in")
+    }
+
+    /// The credentials form used to be nailed to the fleet's first slot, so every other
+    /// server had no way to type its credentials at all. It now follows the selection —
+    /// which means unsaved edits have to survive the selection moving.
+    private static func checkFormFollowsSelection() {
+        let alpha = server(label: "Alpha", host: "10.0.0.1")
+        let beta = server(label: "Beta", host: "10.0.0.2")
+        let coordinator = PVEFleetCoordinator(trustDelegate: nil,
+                                              secretProvider: { _ in "secret" },
+                                              loadGuests: { _ in [] })
+        let session = PVEFleetSession(coordinator: coordinator)
+        session.setProfiles([alpha, beta])
+        let controller = PVEConnectWindowController(session: session)
+
+        controller.probeRetargetForm(to: alpha.id)
+        expect(controller.probeFormHost == "10.0.0.1",
+               "targeting Alpha should show its host, showed “\(controller.probeFormHost)”")
+        controller.probeRetargetForm(to: beta.id)
+        expect(controller.probeFormHost == "10.0.0.2",
+               "targeting Beta should show its host, showed “\(controller.probeFormHost)”")
+        expect(controller.probeFormInstanceID == beta.id, "the form should now be editing Beta")
+
+        // Type against Beta, move away, come back. Losing this is the bug the Manage
+        // Servers sheet already had to solve when its shared fields move between rows.
+        controller.probeTypeIntoForm(host: "10.0.0.99", secret: "typed-for-beta")
+        controller.probeRetargetForm(to: alpha.id)
+        expect(controller.probeFormHost == "10.0.0.1",
+               "Beta's unsaved edit leaked into Alpha's fields: “\(controller.probeFormHost)”")
+        controller.probeRetargetForm(to: beta.id)
+        expect(controller.probeFormHost == "10.0.0.99",
+               "Beta's unsaved host edit was lost when the selection moved, got “\(controller.probeFormHost)”")
+        expect(controller.probeFormSecret == "typed-for-beta",
+               "Beta's unsaved secret was lost when the selection moved")
+
+        controller.setProfiles([alpha])
+        expect(controller.probeFormInstanceID == alpha.id,
+               "dropping the edited server should fall back to one that still exists")
+
+        // Removing a server discards what was typed against it. If it comes back — the
+        // same id restored by a later save — it comes back as stored, not carrying an
+        // edit the user abandoned when they deleted it.
+        controller.setProfiles([alpha, beta])
+        controller.probeRetargetForm(to: beta.id)
+        expect(controller.probeFormHost == "10.0.0.2",
+               "a removed server's abandoned draft came back with it, showing “\(controller.probeFormHost)”")
+        expect(controller.probeFormSecret.isEmpty,
+               "a removed server's abandoned secret came back with it")
     }
 
     /// A box, so the guest loader can be flipped from outside the concurrent closure.
