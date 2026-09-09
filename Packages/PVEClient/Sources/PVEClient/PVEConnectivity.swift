@@ -18,6 +18,7 @@ import Foundation
 public final class PVEConnectivitySignal: @unchecked Sendable {
     private let lock = NSLock()
     private var waitingSince: Date?
+    private var startedAt: Date?
     private var reached = false
 
     public init() {}
@@ -42,10 +43,28 @@ public final class PVEConnectivitySignal: @unchecked Sendable {
         return now.timeIntervalSince(since) >= grace
     }
 
+    /// True once the request has been running for longer than `grace` without the server
+    /// ever answering — no TLS challenge, no response, nothing.
+    ///
+    /// A path that exists but leads to something silent — a host listening on 8006 that
+    /// is not Proxmox, a wedged node, a middlebox swallowing the handshake — is invisible
+    /// to `waitsForConnectivity`, so the connectivity bound above cannot catch it and the
+    /// whole `timeoutIntervalForResource` runs down. Measured: three minutes of nothing.
+    ///
+    /// Only the wait *before* first contact is bounded here. Once the server has answered,
+    /// a long wait is the trust-on-first-use dialog with a person in front of it, and that
+    /// keeps the generous request timeout.
+    public func hasNotReachedServer(within grace: TimeInterval, now: Date = Date()) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard reached == false, let startedAt else { return false }
+        return now.timeIntervalSince(startedAt) >= grace
+    }
+
     /// Per-request state, so one request's verdict does not carry into the next.
-    public func reset() {
+    public func reset(now: Date = Date()) {
         lock.lock(); defer { lock.unlock() }
         waitingSince = nil
+        startedAt = now
         reached = false
     }
 }

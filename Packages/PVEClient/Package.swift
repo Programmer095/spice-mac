@@ -10,9 +10,12 @@ let package = Package(
     products: [
         .library(name: "PVEClient", targets: ["PVEClient"]),
         .executable(name: "pvecheck", targets: ["pvecheck"]),
+        .executable(name: "hangcheck", targets: ["hangcheck"]),
     ],
     targets: [
         .target(name: "PVEClient"),
         .executableTarget(name: "pvecheck", dependencies: ["PVEClient"]),
+        // Opens real sockets, so it lives apart from pvecheck's socket-free checks.
+        .executableTarget(name: "hangcheck", dependencies: ["PVEClient"]),
     ]
 )

@@ -110,6 +110,20 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   showed once a console had grown the tab group, which made it look like a width
   problem it was not.
 
+- **A server that accepts the connection and then says nothing fails in seconds
+  instead of three silent minutes.** The network path is fine in that case, so
+  waiting for connectivity never applies and the whole resource timeout ran down —
+  measured at 180s against something listening on the port that was not Proxmox.
+  The wait before the server first answers is now bounded on its own; once it has
+  answered, a long wait is a person at the fingerprint dialog and keeps the
+  generous timeout.
+
+- **An unreachable port no longer blames the network.** With connectivity waiting
+  enabled, URLSession reports a refused connection as waiting for a network path
+  rather than as a refusal, so a wrong port or a stopped Proxmox was independently
+  indistinguishable from having no network — and the message sent people to check
+  a VPN that was working. It now names both causes.
+
 - **A blocked network fails in seconds instead of three silent minutes.** An
   unreachable path was parked for the full resource timeout and then reported as
   "Timed out". The wait for a network path is now bounded separately from the wait

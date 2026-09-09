@@ -20,11 +20,22 @@ public final class PVEClient {
     /// the resource timeout's minutes: nothing here is waiting on a person, and the case
     /// `waitsForConnectivity` exists for — a path still coming up at launch — resolves
     /// well inside this.
-    private static let connectivityGrace: TimeInterval = 6
+    private let connectivityGrace: TimeInterval
+    /// How long a request may run with the server never answering at all. Bounded apart
+    /// from `timeoutIntervalForResource`, which is three minutes and covers a person at
+    /// the fingerprint dialog — a phase this one has, by definition, not reached yet.
+    /// Injectable so the integration checks can use a short one without waiting.
+    private let firstContactGrace: TimeInterval
 
-    public init(server: PVEServer, credentials: PVECredentials, trustDelegate: PVETrustDelegate?) {
+    public init(server: PVEServer,
+                credentials: PVECredentials,
+                trustDelegate: PVETrustDelegate?,
+                connectivityGrace: TimeInterval = 6,
+                firstContactGrace: TimeInterval = 20) {
         self.server = server
         self.credentials = credentials
+        self.connectivityGrace = connectivityGrace
+        self.firstContactGrace = firstContactGrace
         let configuration = URLSessionConfiguration.ephemeral
         // A freshly launched process can fire its first request before the system has
         // finished establishing a network path, which fails instantly as
@@ -367,13 +378,25 @@ public final class PVEClient {
         connectivity.reset()
         return try await withThrowingTaskGroup(of: (Data, URLResponse).self) { group in
             group.addTask { [session] in try await session.data(for: request) }
-            group.addTask { [connectivity, server] in
+            group.addTask { [connectivity, server, pathGrace = connectivityGrace, grace = firstContactGrace] in
                 while Task.isCancelled == false {
                     try await Task.sleep(nanoseconds: 250_000_000)
-                    if connectivity.hasWaitedWithoutPath(longerThan: Self.connectivityGrace) {
+                    if connectivity.hasWaitedWithoutPath(longerThan: pathGrace) {
+                        // Deliberately covers two causes at once. With `waitsForConnectivity`
+                        // on, URLSession reports a *refused* connection as waiting for
+                        // connectivity rather than returning cannotConnectToHost — measured —
+                        // so "no network" and "nothing listening on that port" arrive here
+                        // identically. Blaming the network when the port is simply wrong
+                        // sends people to check a VPN that was never the problem.
                         throw PVEError.transport(
-                            "No network path to \(server.host):\(server.port). "
-                            + "Check the connection, VPN, or this app's local network access.")
+                            "Could not reach \(server.host):\(server.port). Nothing may be "
+                            + "listening on that port, or there is no network path to it — "
+                            + "check that Proxmox is running, and the connection or VPN.")
+                    }
+                    if connectivity.hasNotReachedServer(within: grace) {
+                        throw PVEError.transport(
+                            "\(server.host):\(server.port) did not respond. "
+                            + "Something may be listening on that port that is not Proxmox.")
                     }
                 }
                 throw CancellationError()

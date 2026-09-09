@@ -24,9 +24,10 @@ build: ## Build and assemble build/SpiceMac.app
 run: ## Open build/SpiceMac.app
 	@open build/SpiceMac.app
 
-test: ## Run every check runner (vvcheck + pvecheck + inputcheck + scalecheck + uicheck)
+test: ## Run every check runner (vvcheck + pvecheck + hangcheck + inputcheck + scalecheck + uicheck)
 	@( cd Packages/VVConfig && swift run vvcheck )
 	@( cd Packages/PVEClient && swift run pvecheck )
+	@( cd Packages/PVEClient && swift run hangcheck )
 	@( cd Packages/SpiceInputMap && swift run inputcheck )
 	@( cd Packages/DisplayScale && swift run scalecheck )
 	@$(MAKE) --no-print-directory uicheck
