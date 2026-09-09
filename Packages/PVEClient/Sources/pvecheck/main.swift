@@ -949,4 +949,62 @@ t.test("an explicitly typed secret still gets through while a sign-in is in flig
     t.expect(attempts.value >= 2, "a deliberate Sign In must not be swallowed by an automatic one, saw \(attempts.value)")
 }
 
+// MARK: - Bounding the wait for a network path
+
+t.test("a path that is still coming up is given its grace") {
+    let signal = PVEConnectivitySignal()
+    let start = Date()
+    signal.beganWaitingForPath()
+    t.expect(signal.hasWaitedWithoutPath(longerThan: 6, now: start.addingTimeInterval(2)) == false,
+             "two seconds without a path must not fail the request")
+}
+
+t.test("a path that never arrives stops the request instead of waiting out the resource timeout") {
+    let signal = PVEConnectivitySignal()
+    let start = Date()
+    signal.beganWaitingForPath()
+    t.expect(signal.hasWaitedWithoutPath(longerThan: 6, now: start.addingTimeInterval(7)),
+             "past the grace with no path, the request must give up")
+}
+
+t.test("reaching the server retires the short deadline, so a fingerprint dialog keeps the long one") {
+    let signal = PVEConnectivitySignal()
+    let start = Date()
+    signal.beganWaitingForPath()
+    signal.reachedServer()
+    t.expect(signal.hasWaitedWithoutPath(longerThan: 6, now: start.addingTimeInterval(600)) == false,
+             "a human at the trust prompt must not be cut off by the connectivity bound")
+}
+
+t.test("a request that never waited for a path is never failed for one") {
+    let signal = PVEConnectivitySignal()
+    t.expect(signal.hasWaitedWithoutPath(longerThan: 0, now: Date().addingTimeInterval(600)) == false,
+             "no wait was ever recorded, so there is nothing to give up on")
+}
+
+t.test("the verdict does not carry from one request into the next") {
+    let signal = PVEConnectivitySignal()
+    let start = Date()
+    signal.beganWaitingForPath()
+    signal.reset()
+    t.expect(signal.hasWaitedWithoutPath(longerThan: 6, now: start.addingTimeInterval(600)) == false,
+             "a reset signal must start the next request with a clean slate")
+}
+
+t.test("an error reads the same however it is presented") {
+    // `presentError` reaches for `description`, but the console window and any
+    // NSAlert built elsewhere use `localizedDescription`. They must not disagree.
+    let errors: [PVEError] = [
+        .unauthorized,
+        .invalidServer,
+        .transport("No network path to pve.example.com:8006."),
+        .spiceUnavailable(guest: "vm", reason: "no display"),
+    ]
+    for error in errors {
+        t.expectEqual(error.localizedDescription, error.description)
+        t.expect(error.localizedDescription.contains("couldn\u{2019}t be completed") == false,
+                 "\(error) still falls back to Foundation's generic wording")
+    }
+}
+
 t.finishAndExit()

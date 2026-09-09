@@ -81,7 +81,7 @@ public struct PVEGuest: Equatable, Sendable, Identifiable {
     }
 }
 
-public enum PVEError: Error, Equatable, CustomStringConvertible {
+public enum PVEError: LocalizedError, Equatable, CustomStringConvertible {
     case invalidServer
     case malformedTokenID(String)
     case http(status: Int, body: String)
@@ -141,4 +141,9 @@ public enum PVEError: Error, Equatable, CustomStringConvertible {
             return message
         }
     }
+
+    /// Without this, `localizedDescription` on a `PVEError` is Foundation's generic
+    /// "The operation couldn't be completed. (… error N.)" — which is what reaches any
+    /// presenter that does not know to reach for `description` first.
+    public var errorDescription: String? { description }
 }

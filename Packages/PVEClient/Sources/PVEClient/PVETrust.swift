@@ -33,16 +33,25 @@ public func pveFingerprint(of certificate: SecCertificate) -> String {
 }
 
 /// URLSession delegate implementing the policy above.
-final class PVETrustEvaluator: NSObject, URLSessionDelegate {
+final class PVETrustEvaluator: NSObject, URLSessionDelegate, URLSessionTaskDelegate {
     private weak var delegate: PVETrustDelegate?
+    let connectivity: PVEConnectivitySignal
 
-    init(delegate: PVETrustDelegate?) {
+    init(delegate: PVETrustDelegate?, connectivity: PVEConnectivitySignal = PVEConnectivitySignal()) {
         self.delegate = delegate
+        self.connectivity = connectivity
+    }
+
+    func urlSession(_ session: URLSession, taskIsWaitingForConnectivity task: URLSessionTask) {
+        connectivity.beganWaitingForPath()
     }
 
     func urlSession(_ session: URLSession,
                     didReceive challenge: URLAuthenticationChallenge,
                     completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        // A challenge means bytes have crossed to the node, so any remaining wait is on
+        // a person, not on the network.
+        connectivity.reachedServer()
         guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
               let trust = challenge.protectionSpace.serverTrust else {
             completionHandler(.performDefaultHandling, nil)

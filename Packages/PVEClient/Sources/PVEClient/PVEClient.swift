@@ -15,6 +15,13 @@ public final class PVEClient {
     /// is the main reason to prefer them: a reconnect hours later still works.
     private var ticket: PVETicket?
 
+    private let connectivity: PVEConnectivitySignal
+    /// How long a request may sit with no network path before giving up. Seconds, not
+    /// the resource timeout's minutes: nothing here is waiting on a person, and the case
+    /// `waitsForConnectivity` exists for — a path still coming up at launch — resolves
+    /// well inside this.
+    private static let connectivityGrace: TimeInterval = 6
+
     public init(server: PVEServer, credentials: PVECredentials, trustDelegate: PVETrustDelegate?) {
         self.server = server
         self.credentials = credentials
@@ -22,8 +29,9 @@ public final class PVEClient {
         // A freshly launched process can fire its first request before the system has
         // finished establishing a network path, which fails instantly as
         // notConnectedToInternet even though the network is fine. Wait for the path
-        // instead of failing — this only delays when there is genuinely no
-        // connectivity; an unreachable host still fails fast.
+        // instead of failing. That wait is bounded in `fetch` rather than here: left to
+        // `timeoutIntervalForResource` it parks a path that is never coming for three
+        // silent minutes.
         configuration.waitsForConnectivity = true
         // Generous because a TLS challenge can be waiting on a human: the first
         // connection to a self-signed node shows a fingerprint to confirm, and the
@@ -33,8 +41,10 @@ public final class PVEClient {
         configuration.timeoutIntervalForResource = 180
         configuration.httpCookieStorage = nil
         configuration.httpShouldSetCookies = false
+        let evaluator = PVETrustEvaluator(delegate: trustDelegate)
+        self.connectivity = evaluator.connectivity
         self.session = URLSession(configuration: configuration,
-                                  delegate: PVETrustEvaluator(delegate: trustDelegate),
+                                  delegate: evaluator,
                                   delegateQueue: nil)
     }
 
@@ -193,7 +203,9 @@ public final class PVEClient {
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await session.data(for: request)
+            (data, response) = try await fetch(request)
+        } catch let error as PVEError {
+            throw error                      // already phrased for a person; do not re-wrap
         } catch let error as URLError {
             throw PVEError.transport(describe(error))
         } catch {
@@ -241,7 +253,9 @@ public final class PVEClient {
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await session.data(for: request)
+            (data, response) = try await fetch(request)
+        } catch let error as PVEError {
+            throw error
         } catch let error as URLError {
             throw PVEError.transport(describe(error))
         }
@@ -257,6 +271,30 @@ public final class PVEClient {
         let fresh = try PVEProtocol.decodeTicket(data)
         ticket = fresh
         return fresh
+    }
+
+    /// `session.data(for:)`, with the connectivity wait bounded separately from the
+    /// resource timeout. See `PVEConnectivitySignal` for why the two cannot share one
+    /// deadline.
+    private func fetch(_ request: URLRequest) async throws -> (Data, URLResponse) {
+        connectivity.reset()
+        return try await withThrowingTaskGroup(of: (Data, URLResponse).self) { group in
+            group.addTask { [session] in try await session.data(for: request) }
+            group.addTask { [connectivity, server] in
+                while Task.isCancelled == false {
+                    try await Task.sleep(nanoseconds: 250_000_000)
+                    if connectivity.hasWaitedWithoutPath(longerThan: Self.connectivityGrace) {
+                        throw PVEError.transport(
+                            "No network path to \(server.host):\(server.port). "
+                            + "Check the connection, VPN, or this app's local network access.")
+                    }
+                }
+                throw CancellationError()
+            }
+            defer { group.cancelAll() }
+            guard let first = try await group.next() else { throw PVEError.transport("no response") }
+            return first
+        }
     }
 
     /// URLError codes users actually hit here, phrased as something actionable.
