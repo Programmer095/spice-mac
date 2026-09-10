@@ -15,7 +15,7 @@ Thanks for your interest! SpiceMac is a native macOS SPICE client for Proxmox VE
 |------|------|
 | `Sources/SpiceMac` | AppKit/Metal app |
 | `Packages/SpiceController` | connection lifecycle, input, clipboard glue |
-| `Packages/VVConfig`, `Packages/SpiceInputMap` | pure-Swift, unit-tested |
+| `Packages/VVConfig`, `Packages/PVEClient`, `Packages/SpiceInputMap` | pure-Swift, unit-tested |
 | `ThirdParty/CocoaSpice` | vendored Apache-2.0 fork (Proxmox patch + security fixes) |
 
 ## Building & testing

@@ -28,10 +28,29 @@ enum MainMenu {
         mainMenu.addItem(fileItem)
         let fileMenu = NSMenu(title: "File")
         fileItem.submenu = fileMenu
+        fileMenu.addItem(withTitle: "Connect to Proxmox…",
+                         action: #selector(AppDelegate.connectToProxmox(_:)), keyEquivalent: "n")
+        fileMenu.addItem(withTitle: "Manage Servers…",
+                         action: #selector(AppDelegate.manageServers(_:)), keyEquivalent: ",")
         fileMenu.addItem(withTitle: "Open…",
                          action: #selector(AppDelegate.openDocument(_:)), keyEquivalent: "o")
         fileMenu.addItem(withTitle: "Close",
                          action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        fileMenu.addItem(.separator())
+        fileMenu.addItem(withTitle: "Send Files to Guest…",
+                         action: #selector(AppDelegate.sendFilesToGuest(_:)), keyEquivalent: "S")
+        // Deliberately no ⌘V: that key falls through to the guest as a keystroke, and
+        // binding it here would swallow paste inside the VM.
+        fileMenu.addItem(withTitle: "Send Files from Clipboard",
+                         action: #selector(AppDelegate.sendClipboardFilesToGuest(_:)), keyEquivalent: "")
+        fileMenu.addItem(.separator())
+        fileMenu.addItem(withTitle: "Choose Shared Folder…",
+                         action: #selector(AppDelegate.chooseSharedFolder(_:)), keyEquivalent: "")
+        let shareReadOnly = NSMenuItem(title: "Share Read-Only",
+                                       action: #selector(AppDelegate.toggleSharedFolderReadOnly(_:)), keyEquivalent: "")
+        fileMenu.addItem(shareReadOnly)
+        fileMenu.addItem(withTitle: "Stop Sharing Folder",
+                         action: #selector(AppDelegate.clearSharedFolder(_:)), keyEquivalent: "")
         fileMenu.addItem(.separator())
         let trashAfterUse = NSMenuItem(title: "Move .vv to Trash After Connecting",
                                        action: #selector(AppDelegate.toggleTrashConnectionFile(_:)), keyEquivalent: "")

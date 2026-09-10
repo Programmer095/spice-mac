@@ -126,23 +126,19 @@ public final class SpicePasteboardBridge: NSObject, CSPasteboardDelegate {
     }
 
     /// Map a SPICE pasteboard type to the closest `NSPasteboard` UTI type.
+    ///
+    /// Only these five are reachable: the SPICE clipboard vocabulary is UTF-8 text plus
+    /// PNG/BMP/TIFF/JPEG (`vd_agent.h`), with no slot for markup, PDF or file lists.
+    /// Mapping richer types here would imply a fidelity the protocol cannot carry —
+    /// rich text always arrives plain, and files move by transfer or the shared folder.
     static func nsType(_ type: CSPasteboardType) -> NSPasteboard.PasteboardType? {
         switch type {
         case .string:       return .string
-        case .html:         return .html
-        case .rtf:          return .rtf
-        case .rtfd:         return .rtfd
-        case .pdf:          return .pdf
         case .png:          return .png
         case .tiff:         return .tiff
-        case .fileURL:      return .fileURL
-        case .URL:          return .URL
-        case .tabularText:  return .tabularText
-        case .font:         return .font
-        case .sound:        return .sound
         case .jpg:          return NSPasteboard.PasteboardType("public.jpeg")
         case .bmp:          return NSPasteboard.PasteboardType("com.microsoft.bmp")
-        @unknown default:   return nil
+        default:            return nil
         }
     }
 }

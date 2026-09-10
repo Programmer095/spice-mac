@@ -367,25 +367,42 @@ static void cs_channel_destroy(SpiceSession *session, SpiceChannel *channel,
     if (!self.main || !self.shareClipboard || self.sessionReadOnly || !self.pasteboardDelegate) {
         return;
     }
-    guint32 type = VD_AGENT_CLIPBOARD_NONE;
+    // spice-mac (fix): offer EVERY representation the host pasteboard holds, not just
+    // the first match. Previously this picked one type with image ranked above text,
+    // so copying from an app that puts both on the pasteboard (Numbers, Keynote,
+    // Preview, many browsers) advertised only the image and pasting into a guest text
+    // field silently got nothing. The guest picks what it wants; cs_clipboard_request
+    // already serves any of these on demand.
+    guint32 types[5];
+    int ntypes = 0;
     id<CSPasteboardDelegate> pb = self.pasteboardDelegate;
     if ([pb canReadItemForType:kCSPasteboardTypePng]) {
-        type = VD_AGENT_CLIPBOARD_IMAGE_PNG;
-    } else if ([pb canReadItemForType:kCSPasteboardTypeBmp]) {
-        type = VD_AGENT_CLIPBOARD_IMAGE_BMP;
-    } else if ([pb canReadItemForType:kCSPasteboardTypeTiff]) {
-        type = VD_AGENT_CLIPBOARD_IMAGE_TIFF;
-    } else if ([pb canReadItemForType:kCSPasteboardTypeJpg]) {
-        type = VD_AGENT_CLIPBOARD_IMAGE_JPG;
-    } else if ([pb canReadItemForType:kCSPasteboardTypeString]) {
-        type = VD_AGENT_CLIPBOARD_UTF8_TEXT;
-    } else {
+        types[ntypes++] = VD_AGENT_CLIPBOARD_IMAGE_PNG;
+    }
+    if ([pb canReadItemForType:kCSPasteboardTypeBmp]) {
+        types[ntypes++] = VD_AGENT_CLIPBOARD_IMAGE_BMP;
+    }
+    if ([pb canReadItemForType:kCSPasteboardTypeTiff]) {
+        types[ntypes++] = VD_AGENT_CLIPBOARD_IMAGE_TIFF;
+    }
+    if ([pb canReadItemForType:kCSPasteboardTypeJpg]) {
+        types[ntypes++] = VD_AGENT_CLIPBOARD_IMAGE_JPG;
+    }
+    if ([pb canReadItemForType:kCSPasteboardTypeString]) {
+        types[ntypes++] = VD_AGENT_CLIPBOARD_UTF8_TEXT;
+    }
+    if (ntypes == 0) {
         SPICE_DEBUG("[CocoaSpice] pasteboard with unrecognized type");
+        return;
     }
     if (spice_main_channel_agent_test_capability(self.main, VD_AGENT_CAP_CLIPBOARD_BY_DEMAND)) {
+        // The C array cannot be captured by the block, so hand over a copy the block owns.
+        guint32 *offered = malloc(sizeof(guint32) * ntypes);
+        memcpy(offered, types, sizeof(guint32) * ntypes);
+        guint32 offeredCount = (guint32)ntypes;
         [CSMain.sharedInstance asyncWith:^{
-            guint32 _type = type;
-            spice_main_channel_clipboard_selection_grab(self.main, VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD, &_type, 1);
+            spice_main_channel_clipboard_selection_grab(self.main, VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD, offered, offeredCount);
+            free(offered);
         }];
     }
 }

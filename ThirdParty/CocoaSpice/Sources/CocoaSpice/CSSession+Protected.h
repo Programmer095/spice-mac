@@ -17,6 +17,7 @@
 #import "CSSession.h"
 
 typedef struct _SpiceSession SpiceSession;
+typedef struct _SpiceMainChannel SpiceMainChannel;
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -24,6 +25,9 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// SPICE GTK session
 @property (nonatomic, readonly, nullable) SpiceSession *session;
+
+/// SPICE GTK main channel, once the session has one
+@property (nonatomic, readonly, nullable) SpiceMainChannel *main;
 
 /// Create a new handler for a SPICE session
 /// @param session SPICE session

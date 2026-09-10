@@ -6,6 +6,106 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Connect to Proxmox natively (File ▸ Connect to Proxmox…, ⌘N).** Sign in to a
+  node with an API token (or username/password) and pick a VM from a searchable
+  list — no more downloading a `.vv` from the web UI for every connection. The
+  server and token are remembered (secret in the Keychain, never in
+  `UserDefaults`), so launching the app goes straight to the VM list.
+- **Reconnect.** Because the app can now mint tickets itself, a dropped Proxmox
+  session offers a **Reconnect** button instead of the previous
+  "open a fresh `.vv` file" dead end. Ticket lifetime made this impossible before:
+  a SPICE ticket is single-use and expires in ~30 seconds.
+- **Trust-on-first-use TLS pinning.** Proxmox's self-signed certificate is shown
+  once as a SHA-256 fingerprint to confirm against Datacenter ▸ Certificates, then
+  pinned; a later certificate change is surfaced as a warning rather than accepted
+  silently. Preferred over a blanket "allow insecure" switch, which would accept
+  any certificate forever.
+- **Tabbed consoles.** Sessions and the connect window share one macOS tab group
+  instead of scattering windows: ⌘⇧[ / ⌘⇧] to move between them, drag a tab out to
+  give a console its own window, drag it back to rejoin. Because tabs share a frame,
+  a tabbed console takes its resolution from the window and every guest in the group
+  is asked to match — so switching tabs triggers no mode switch. Standalone windows
+  keep sizing themselves to their guest.
+- **Guest power management.** Start, Shut Down, Restart, Force Stop, Force Reset,
+  Suspend and Resume from the guest list's context menu or the Power menu, so
+  routine power cycling no longer means opening the Proxmox web UI. Actions that
+  don't apply to a guest's current state are disabled rather than hidden, the two
+  that cut power without telling the guest OS confirm first, and the resulting
+  Proxmox task is followed to completion before the list is re-read. Opening the
+  console on a stopped guest offers to start it and connect once it is up.
+  Requires `VM.PowerMgmt` on the token (included in `PVEVMUser`).
+- **Send files to the guest.** Drag files onto the session window, or use File ▸ Send
+  Files to Guest… (⇧⌘S) / Send Files from Clipboard, with progress and cancel. Wraps
+  `spice_main_channel_file_copy_async` in a new `CSSession (FileTransfer)` category.
+  ⌘V is deliberately left unbound so paste still reaches the guest.
+- **WebDAV shared folder (File ▸ Choose Shared Folder…).** Offers a host folder to
+  the guest as a network drive, which is the only way to move files guest → host:
+  the SPICE agent's file transfer is client → guest only, with no counterpart in the
+  protocol. Read-only by default; the choice is stored as a security-scoped bookmark
+  and applies from the next connection. This enables the sharing support that was
+  present but deliberately switched off pending a UI for choosing the directory.
+- **Several Proxmox servers at once (File ▸ Manage Servers…).** SpiceMac is no
+  longer a one-server-at-a-time client: configure as many Proxmox servers as you
+  like — each with its own nickname, credentials and Keychain item — and every
+  guest across all of them appears in a single searchable tree, grouped under the
+  server it belongs to. Sign-in happens concurrently and independently per server,
+  so a site that is down reports on its own row and the rest of the fleet still
+  works; it is no longer a modal failure over the whole app. Anything that blocks
+  on a person — the certificate dialog, Keychain access, being asked for a secret
+  — is serialised through one queue, so ten servers cannot stack ten dialogs at
+  launch. Right-click a server row for Sign In, Sign Out and Refresh.
+- **Manage Servers.** A sheet with the server list on the left and the credential
+  form on the right: add, remove, rename, and switch between API-token and
+  password auth per server. Renaming a server’s host or token moves its Keychain
+  item with it, removing one deletes its secret and forgets its pinned
+  certificate, and Cancel touches neither the Keychain nor the stored fleet.
+- **“Remember in Keychain” off now means “ask me each time.”** A server with no
+  stored secret is asked for one at sign-in, through the same prompt queue.
+- An existing single saved server is migrated into a fleet of one on first launch,
+  keeping its Keychain account and its certificate pin, so nothing is re-entered
+  or re-approved.
+- `Packages/PVEClient` — the Proxmox API binding *and the fleet model*,
+  dependency-free and unit-tested via `swift run pvecheck` (84 checks; 143 across
+  all four runners).
+
+### Changed
+
+- **The app now opens the Proxmox browser instead of a `.vv` file picker.** A file
+  chooser made sense when a `.vv` was the only way in; it is now the fallback, so
+  launch shows the guest list (or the sign-in form) and the file route moved to
+  File ▸ Open, an Open .vv File… button in the browser, and dropping a file on the
+  app. Clicking the Dock icon with no windows open brings the browser back.
+
+- The pasteboard type map no longer claims HTML, RTF, PDF, file-list or URL support.
+  Those entries were unreachable — the SPICE clipboard carries only UTF-8 text and
+  PNG/BMP/TIFF/JPEG — and implied a fidelity the protocol cannot deliver.
+- Credentials moved out of the connect window’s inline form and into Manage
+  Servers. The window keeps a form for the first server so a fresh install still
+  has somewhere obvious to type; every other server is edited in the sheet.
+
+### Fixed
+
+- **Password sign-ins no longer break after about two hours.** The cached login
+  ticket was never re-minted, so once it expired every refresh reported a
+  credentials failure with a perfectly good password. A 401 on password auth now
+  clears the ticket and retries once. API tokens were never affected.
+
+- **A successful sign-in no longer leaves the credentials form filling the window.**
+  The form folds away into a status line once connected, giving the space to the guest
+  list; the Sign In button becomes Sign Out to bring it back.
+- **Signing in no longer costs two Keychain prompts.** The secret was rewritten to the
+  Keychain on every successful sign-in even when unchanged, so a read and a write were
+  each authorized separately. Unchanged secrets are no longer rewritten. (A single
+  recurring prompt is inherent to ad-hoc signing — see the README.)
+- **Copying from an app that puts both an image and text on the pasteboard no longer
+  loses the text.** The host → guest clipboard grab advertised a single type with
+  images ranked above text, so copying from Numbers, Keynote, Preview or many
+  browsers offered only the image and pasting into a guest text field silently got
+  nothing. Every available representation is now offered and the guest picks.
+
+
 ## [0.1.8] — 2026-08-28
 
 ### Added

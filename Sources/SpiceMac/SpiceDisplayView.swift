@@ -56,7 +56,12 @@ final class SpiceDisplayView: MTKView {
         commonInit()
     }
 
+    /// Set to accept files dropped on the guest display. Nil (the default) declines
+    /// drops, so a session that cannot transfer shows the no-drop cursor.
+    var onFilesDropped: (([URL]) -> Void)?
+
     private func commonInit() {
+        registerForDraggedTypes([.fileURL])
         colorPixelFormat = .bgra8Unorm
         framebufferOnly = false
         // Frames are pushed by CocoaSpice; run continuously so the latest texture
@@ -324,5 +329,35 @@ final class SpiceDisplayView: MTKView {
             options: [.activeInKeyWindow, .inVisibleRect, .mouseMoved, .mouseEnteredAndExited],
             owner: self, userInfo: nil)
         addTrackingArea(area)
+    }
+}
+
+
+// MARK: - Dropping files onto the guest
+
+extension SpiceDisplayView {
+
+    private func droppedFileURLs(_ sender: NSDraggingInfo) -> [URL] {
+        let options: [NSPasteboard.ReadingOptionKey: Any] = [.urlReadingFileURLsOnly: true]
+        guard let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self],
+                                                               options: options) as? [URL] else { return [] }
+        return urls
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard onFilesDropped != nil, droppedFileURLs(sender).isEmpty == false else { return [] }
+        return .copy
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard onFilesDropped != nil, droppedFileURLs(sender).isEmpty == false else { return [] }
+        return .copy
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let urls = droppedFileURLs(sender)
+        guard urls.isEmpty == false, let handler = onFilesDropped else { return false }
+        handler(urls)
+        return true
     }
 }

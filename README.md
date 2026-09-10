@@ -13,9 +13,9 @@ UTM uses). Apple-Silicon only.
 > sysroot). Verified end-to-end: Metal display with aspect-fit scaling and live
 > resize; keyboard including ⌘/modifiers; mouse with the guest cursor aligned to
 > the macOS pointer; bidirectional clipboard; and audio (needs a SPICE audio
-> device on the VM). USB redirection is plumbed via the Connection menu. The `.vv`
-> parser, keyboard map, and zoom geometry are also unit-tested (59 dependency-free
-> checks).
+> device on the VM). USB redirection is plumbed via the Connection menu. The
+> Proxmox API binding and fleet model, `.vv` parser, keyboard map, and zoom
+> geometry are also unit-tested (143 dependency-free checks).
 >
 > | Feature | Status |
 > |---|---|
@@ -25,6 +25,7 @@ UTM uses). Apple-Silicon only.
 > | Clipboard (Mac↔VM, both directions) | ✅ |
 > | Audio (guest needs a SPICE audio device) | ✅ |
 > | USB redirection | plumbed |
+> | Several Proxmox servers signed in at once, one guest tree | ✅ |
 
 ## Download
 
@@ -162,14 +163,144 @@ the matching build-time headers; keep the sysroot version in sync with them.
 
 ## Connecting to Proxmox
 
+### Sign in and pick a VM (recommended)
+
+SpiceMac opens here. **File ▸ Connect to Proxmox…** (⌘N) signs in and lists guests,
+so there is no `.vv` download step at all. With a saved server it signs in on
+launch and goes straight to the VM list; without one it shows the sign-in form.
+Select a VM and click **Open Console** (or double-click it); SpiceMac requests a
+fresh ticket at that moment.
+
+1. In the Proxmox web UI create an API token under **Datacenter ▸ Permissions ▸
+   API Tokens** and give it **`VM.Console`** on the VMs you want to reach. Prefer
+   this over a password: it can be scoped narrowly, revoked on its own, and never
+   expires, so a reconnect hours later still works.
+2. Enter the server address and the token (`user@realm!tokenname`) plus its
+   secret. Tick **Remember in Keychain** and SpiceMac signs in on launch and goes
+   straight to the VM list.
+3. The first connection shows the node's TLS certificate fingerprint for you to
+   confirm against **Datacenter ▸ Certificates** — see [Security](#security).
+4. The VM's **Display must be SPICE/qxl** (`qm set <vmid> --vga qxl`), and the
+   guest must run **`spice-vdagent`** for clipboard sharing and dynamic resolution.
+
+Because the app can mint tickets, a dropped session offers a **Reconnect** button
+rather than sending you back to the web UI.
+
+### Several servers at once
+
+**File ▸ Manage Servers…** configures as many Proxmox servers as you like — home
+lab, a client's cluster, a rack somewhere else — each with its own nickname,
+credentials and Keychain item. Every guest across all of them appears in one
+searchable tree, grouped under the server it belongs to, so there is no
+disconnect-and-sign-in-elsewhere step.
+
+- Sign-in runs **concurrently and independently** per server. One site being down
+  reports on that server's own row and leaves the rest of the fleet working.
+- Anything that has to **block on you** — the certificate dialog, Keychain access,
+  being asked for a secret — is serialised through a single queue, so a fleet of
+  ten cannot stack ten dialogs at launch.
+- Right-click a server row for **Sign In**, **Sign Out** and **Refresh**; the
+  search field filters servers and guests together.
+- Renaming a server's host or token **moves its Keychain item with it**; removing
+  a server deletes its secret and forgets its pinned certificate. **Cancel** in the
+  sheet touches neither.
+- With **Remember in Keychain** off, SpiceMac asks for that server's secret at each
+  sign-in rather than refusing to connect.
+
+Upgrading from a single saved server needs no work: it is migrated into a fleet of
+one on first launch, keeping its Keychain account and its certificate pin, so
+nothing is re-entered or re-approved.
+
+### Moving files
+
+SPICE's agent file transfer is **one-way by design** — client → guest only. There is
+no guest → client counterpart in the protocol, so the two directions use different
+mechanisms:
+
+- **Mac → guest:** drag files onto the session window, or **File ▸ Send Files to
+  Guest…** (⇧⌘S), or **File ▸ Send Files from Clipboard** when you have files copied
+  in Finder. The guest agent chooses the destination, usually the desktop or
+  downloads folder. Progress is shown with a Cancel button. Requires
+  `spice-vdagent` in the guest.
+- **Both directions:** **File ▸ Choose Shared Folder…** offers a folder over SPICE's
+  WebDAV channel; it appears in the guest as a network drive and files move either
+  way by dragging. The guest needs `spice-webdavd` running.
+
+The share is **read-only by default** — toggle **File ▸ Share Read-Only** off to let
+the guest write to it, bearing in mind that a compromised guest can then write onto
+your Mac. The folder is negotiated during session setup, so a change applies to the
+next connection, not open ones.
+
+Note ⌘V is deliberately *not* bound to file sending: it falls through to the guest as
+a keystroke, and binding it would break paste inside the VM.
+
+### Clipboard
+
+Text and images (PNG, BMP, TIFF, JPEG) sync both ways, and a copy carrying several
+representations offers all of them so the guest can pick. **Rich text is not
+possible** — the SPICE clipboard vocabulary is UTF-8 text plus those four image
+formats, with no slot for HTML or RTF, so formatting is always lost. Clipboard file
+lists are likewise not part of what the client can carry; use the file transfer or
+shared folder above.
+
+### Tabs
+
+Consoles and the connect window share one tab group, so a session opens as a tab
+rather than a window to hunt for. **⌘⇧[** and **⌘⇧]** move between them, and a tab
+dragged out of the bar becomes its own window — put one console on a second monitor
+and leave the rest tabbed. Drag it back to rejoin.
+
+Tabs cannot be sized independently, so a tabbed console follows the shared frame
+rather than the other way round: resize the window and **every guest in the group is
+asked to match it**. That is what makes switching tabs instant — the guests are
+already at the right resolution, so nothing reconfigures. A window on its own keeps
+the original behavior and sizes itself to its guest.
+
+Two consequences worth knowing: resizing reconfigures every guest in the group, not
+just the visible one (debounced to when you release the drag); and a guest without
+`spice-vdagent` cannot follow, so it keeps its own resolution and letterboxes.
+
+### Keychain prompts
+
+An ad-hoc signed build (the default) has no stable code identity — its signature is
+the code hash, which changes on every rebuild — so the Keychain treats each build as
+a different application and re-asks for the stored secret. Clicking **Always Allow**
+only holds until the next build.
+
+Build with a real signing identity and the prompt stops recurring:
+
+```sh
+SIGN_IDENTITY="Apple Development: you@example.com (TEAMID)" make build
+```
+
+`security find-identity -v -p codesigning` lists what you have.
+
+### Power management
+
+Right-click a guest in the list (or use the **Power** menu) to **Start**, **Shut
+Down**, **Restart**, **Force Stop**, **Force Reset**, or suspend/resume it —
+without opening the Proxmox web UI. Actions are greyed out when they don't apply
+to the guest's current state, and the two that cut power without telling the guest
+OS (**Force Stop**, **Force Reset**) ask for confirmation first. Opening the
+console on a stopped guest offers to start it and connect once it is up.
+
+This needs **`VM.PowerMgmt`** on the token, which `PVEVMUser` already includes.
+SpiceMac follows the resulting Proxmox task to completion and then re-reads the
+guest list, so the status column reflects what actually happened rather than what
+was requested.
+
+### Or open a `.vv` file
+
+The file route is still there, it is just no longer what the app opens with — reach
+it from **File ▸ Open** (⌘O), the **Open .vv File…** button in the connect window, or
+by dropping a file on the app.
+
 1. In the Proxmox web UI, open a VM whose **Display is set to SPICE/qxl**
    (`qm set <vmid> --vga qxl`), click **Console ▸ SPICE**, and download the
    `.vv` file.
 2. Open it in SpiceMac (double-click, drag onto the app, or **File ▸ Open**).
    **Do this promptly** — the SPICE ticket inside is single-use and valid for only
    ~30 seconds. To reconnect, download a fresh `.vv`.
-3. For clipboard sharing and dynamic resolution, the guest must run
-   **`spice-vdagent`**.
 
 What the app does with the `.vv`: parses the opaque `host` token, `proxy`
 (`http://node:3128`), `tls-port`, one-time `password`, `host-subject`, and CA
@@ -183,6 +314,7 @@ The pure-Swift libraries build and test with just the Swift toolchain (no Xcode)
 
 ```sh
 ( cd Packages/VVConfig      && swift run vvcheck )     # .vv parser: 24 checks
+( cd Packages/PVEClient     && swift run pvecheck )    # Proxmox API + fleet model: 84 checks
 ( cd Packages/SpiceInputMap && swift run inputcheck )  # scancode map: 14 checks
 ( cd Packages/DisplayScale  && swift run scalecheck )  # zoom geometry: 21 checks
 ```
