@@ -35,6 +35,124 @@ public enum PVEProtocol {
         return "/api2/spiceconfig/nodes/\(encodedNode)/\(kind.rawValue)/\(vmid)/spiceproxy"
     }
 
+    /// Storage contents of one type on a node, e.g. the ISO images available to attach.
+    public static func storageContentPath(node: String, storage: String, content: String) -> String {
+        let encodedNode = node.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? node
+        let encodedStorage = storage.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? storage
+        return "/api2/json/nodes/\(encodedNode)/storage/\(encodedStorage)/content?content=\(content)"
+    }
+
+    /// The storages visible to a node.
+    public static func storageListPath(node: String) -> String {
+        let encodedNode = node.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? node
+        return "/api2/json/nodes/\(encodedNode)/storage"
+    }
+
+    /// A guest's config endpoint — the same path attaches and detaches a CD-ROM.
+    public static func configPath(node: String, vmid: Int, kind: PVEGuest.Kind) -> String {
+        let encodedNode = node.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? node
+        return "/api2/json/nodes/\(encodedNode)/\(kind.rawValue)/\(vmid)/config"
+    }
+
+    // MARK: - Permissions
+
+    /// The ACL paths that govern `guest`, most general first. Proxmox applies the most
+    /// specific matching ACL, but for "may I do this at all" any of them granting the
+    /// privilege is enough.
+    public static func aclPaths(forVMID vmid: Int) -> [String] {
+        ["/", "/vms", "/vms/\(vmid)"]
+    }
+
+    /// Whether the token holds `privilege` over `vmid`.
+    ///
+    /// Checked before offering an action rather than after attempting one: a token
+    /// without the privilege signs in, lists guests and looks entirely healthy right up
+    /// to the point the write 403s.
+    public static func grants(_ privilege: String,
+                              forVMID vmid: Int,
+                              in payload: [String: [String: Int]]) -> Bool {
+        let governing = Set(aclPaths(forVMID: vmid))
+        return payload.contains { path, privileges in
+            governing.contains(path) && privileges[privilege].map { $0 != 0 } == true
+        }
+    }
+
+    // MARK: - ISO images
+
+    /// The `ide2` value that attaches `volumeID` as a CD-ROM.
+    public static func cdromAttachValue(volumeID: String) -> String {
+        "\(volumeID),media=cdrom"
+    }
+
+    /// The `ide2` value that leaves the drive present but empty. Proxmox distinguishes
+    /// this from deleting the device, and an empty drive is what a guest expects to see
+    /// after an eject.
+    public static func cdromDetachValue() -> String { "none,media=cdrom" }
+
+    /// Volume IDs of the ISO images in a storage-content payload.
+    public static func decodeISOVolumeIDs(_ data: Data) throws -> [String] {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let rows = object["data"] as? [[String: Any]] else {
+            throw PVEError.decoding("unexpected storage content payload")
+        }
+        return rows.compactMap { $0["volid"] as? String }.sorted()
+    }
+
+    /// Every storage name in the payload, whatever it holds.
+    public static func decodeStorageNames(_ data: Data) throws -> [String] {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let rows = object["data"] as? [[String: Any]] else {
+            throw PVEError.decoding("unexpected storage list payload")
+        }
+        return rows.compactMap { $0["storage"] as? String }.sorted()
+    }
+
+    /// Names of the storages on a node that advertise `content`, e.g. `iso`.
+    public static func decodeStorages(advertising content: String, from data: Data) throws -> [String] {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let rows = object["data"] as? [[String: Any]] else {
+            throw PVEError.decoding("unexpected storage list payload")
+        }
+        return rows.compactMap { row -> String? in
+            guard let name = row["storage"] as? String,
+                  let advertised = row["content"] as? String,
+                  advertised.split(separator: ",").contains(where: { $0.trimmingCharacters(in: .whitespaces) == content })
+            else { return nil }
+            return name
+        }.sorted()
+    }
+
+    /// The ISO currently in a guest's CD-ROM, from its raw `ide2` value.
+    ///
+    /// Proxmox writes back more than was sent — `local:iso/x.iso,media=cdrom,size=632640K` —
+    /// so the volume is the part before the first comma. An empty drive is the literal
+    /// `none`, which is not a volume.
+    public static func attachedISOVolumeID(fromCDROMValue value: String?) -> String? {
+        guard let value, let first = value.split(separator: ",").first else { return nil }
+        let volume = String(first).trimmingCharacters(in: .whitespaces)
+        return (volume.isEmpty || volume == "none") ? nil : volume
+    }
+
+    /// One key out of a guest's config payload. Values are scalars in practice
+    /// (`ide2` is a string, `memory` a number), so both are rendered as text.
+    public static func decodeConfigValue(_ data: Data, key: String) throws -> String? {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let payload = object["data"] as? [String: Any] else {
+            throw PVEError.decoding("unexpected guest config payload")
+        }
+        switch payload[key] {
+        case let text as String: return text
+        case let number as NSNumber: return number.stringValue
+        default: return nil
+        }
+    }
+
+    /// The filename a volume ID ends in — `local:iso/debian-12.iso` reads as
+    /// `debian-12.iso` in a menu.
+    public static func isoDisplayName(forVolumeID volumeID: String) -> String {
+        volumeID.split(separator: "/").last.map(String.init) ?? volumeID
+    }
+
     // MARK: - Encoding
 
     /// `application/x-www-form-urlencoded` body. Sorted for deterministic tests.

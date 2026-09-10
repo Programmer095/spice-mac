@@ -7,6 +7,7 @@ import PVEClient
 /// App entry: builds the menu and opens Proxmox SPICE sessions — either by signing
 /// in to a node and picking a guest (File ▸ Connect to Proxmox…), or from a `.vv`
 /// file (double-click, File ▸ Open, drag-and-drop) — spawning a window per session.
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     private var windowControllers: [SpiceWindowController] = []
@@ -27,12 +28,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     private var proxmoxBrowser: PVEConnectWindowController {
         if let createdBrowser { return createdBrowser }
-        let controller = PVEConnectWindowController()
+        let controller = PVEConnectWindowController(session: .shared)
         controller.onOpenConsole = { [weak self] guest, client in
             self?.openProxmoxConsole(guest: guest, client: client)
         }
         controller.onOpenVVFile = { [weak self] in
             self?.presentOpenPanelFromBrowser()
+        }
+        controller.onManageServers = { [weak self] in
+            self?.manageServers(nil)
         }
         createdBrowser = controller
         return controller
@@ -179,6 +183,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     @objc func connectToProxmox(_ sender: Any?) {
         didOpenAny = true
         proxmoxBrowser.present()
+    }
+
+    /// Toggles the guest picker in the frontmost console. There is nothing to overlay in
+    /// the connect tab — that window *is* the full browser — so this brings it forward
+    /// instead of doing nothing.
+    @objc func toggleGuestOverlay(_ sender: Any?) {
+        if let controller = activeSessionController {
+            controller.toggleGuestOverlay()
+        } else {
+            proxmoxBrowser.present(autoConnect: false)
+        }
+    }
+
+    /// Power and CD-ROM for the guest in the frontmost console. Nothing to act on
+    /// without one — a `.vv` session has no API behind it either.
+    @objc func toggleActionBar(_ sender: Any?) {
+        activeSessionController?.toggleActionBar()
     }
 
     @objc func manageServers(_ sender: Any?) {
@@ -330,6 +351,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             if let accessed = share.accessed { securityScopedShares.insert(accessed) }
         }
         let controller = SpiceWindowController(client: client, origin: origin)
+        controller.onOpenGuest = { [weak self] guest, client in
+            self?.openProxmoxConsole(guest: guest, client: client)
+        }
         controller.onClose = { [weak self, weak controller] in
             guard let self else { return }
             self.windowControllers.removeAll { $0 === controller }

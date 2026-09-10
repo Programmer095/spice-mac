@@ -772,47 +772,598 @@ t.test("a stored secret is used without troubling the prompt") {
 
 // MARK: - Editing a signed-in profile
 
+/// A coordinator whose guests arrive without a server, so the tests below can reach
+/// states that only exist *after* a successful sign-in. `signedInCoordinator` returns
+/// one already holding a live client for `profile`.
+@MainActor
+func signedInCoordinator(_ profile: PVEServerProfile,
+                         guests: [PVEGuest] = [],
+                         onChange: ((PVEFleetState) -> Void)? = nil) -> PVEFleetCoordinator {
+    let coordinator = PVEFleetCoordinator(trustDelegate: nil,
+                                          secretProvider: { _ in "s" },
+                                          loadGuests: { _ in guests })
+    coordinator.setProfiles([profile])
+    coordinator.onChange = onChange
+    coordinator.signIn(profile.id)
+    return coordinator
+}
+
+/// A port nothing is listening on, so a test that does reach the network fails at once.
+func sampleProfile(host: String = "127.0.0.1") -> PVEServerProfile {
+    signInProfile(host: host, port: 1)
+}
+
+let sampleGuest = PVEGuest(vmid: 100, name: "vm", node: "n1", status: "running", kind: .qemu)
+
 t.test("editing where a signed-in server points signs it out") {
-    let profile = signInProfile(host: "127.0.0.1", port: 1)
+    let profile = sampleProfile()
     let id = profile.id
-    let box = Box<PVEInstanceState?>(nil)
+    let live = Box<AnyObject?>(nil)
+    let signedIn = Box<Bool>(false)
+    let after = Box<PVEInstanceState?>(nil)
     let host = Box<String?>(nil)
     let hasClient = Box<Bool?>(nil)
 
     Task { @MainActor in
-        let coordinator = PVEFleetCoordinator(trustDelegate: nil, secretProvider: { _ in "s" })
-        coordinator.setProfiles([profile])
+        let coordinator = signedInCoordinator(profile, guests: [sampleGuest]) { state in
+            if case .signedIn = state.instance(id)?.state { signedIn.value = true }
+        }
+        live.value = coordinator
+    }
+    waitOnMain { signedIn.value }
+    t.expect(signedIn.value, "the instance never reached .signedIn, so the rest asserts nothing")
+
+    Task { @MainActor in
+        guard let coordinator = live.value as? PVEFleetCoordinator else { return }
         var moved = profile
         moved.host = "192.0.2.1"
         coordinator.setProfiles([moved])
         host.value = coordinator.state.instance(id)?.profile.host
         hasClient.value = coordinator.client(for: id) != nil
-        box.value = coordinator.state.instance(id)?.state
+        after.value = coordinator.state.instance(id)?.state
     }
-    waitOnMain { box.value != nil }
-    t.expectEqual(box.value, .signedOut)
+    waitOnMain { after.value != nil }
+    t.expectEqual(after.value, .signedOut)
     t.expectEqual(host.value, "192.0.2.1")
     t.expectEqual(hasClient.value, false)
 }
 
 t.test("a cosmetic edit leaves a signed-in server alone") {
-    let profile = signInProfile(host: "127.0.0.1", port: 1)
+    let profile = sampleProfile()
     let id = profile.id
+    let live = Box<AnyObject?>(nil)
+    let signedIn = Box<Bool>(false)
+    let after = Box<PVEInstanceState?>(nil)
     let label = Box<String?>(nil)
-    let state = Box<PVEInstanceState?>(nil)
+    let hasClient = Box<Bool?>(nil)
 
     Task { @MainActor in
-        let coordinator = PVEFleetCoordinator(trustDelegate: nil, secretProvider: { _ in "s" })
-        coordinator.setProfiles([profile])
+        let coordinator = signedInCoordinator(profile, guests: [sampleGuest]) { state in
+            if case .signedIn = state.instance(id)?.state { signedIn.value = true }
+        }
+        live.value = coordinator
+    }
+    waitOnMain { signedIn.value }
+    t.expect(signedIn.value, "the instance never reached .signedIn, so the rest asserts nothing")
+
+    Task { @MainActor in
+        guard let coordinator = live.value as? PVEFleetCoordinator else { return }
         var renamed = profile
         renamed.label = "Rack B"
         coordinator.setProfiles([renamed])
-        state.value = coordinator.state.instance(id)?.state
         label.value = coordinator.state.instance(id)?.profile.label
+        hasClient.value = coordinator.client(for: id) != nil
+        after.value = coordinator.state.instance(id)?.state
     }
-    waitOnMain { label.value != nil }
+    waitOnMain { after.value != nil }
     t.expectEqual(label.value, "Rack B")
-    t.expectEqual(state.value, .signedOut)
+    t.expectEqual(after.value, .signedIn([sampleGuest]))
+    t.expectEqual(hasClient.value, true)
+}
+
+// MARK: - Recovering from a failed sign-in
+
+t.test("a failed sign-in leaves no client behind, so Refresh cannot reuse bad credentials") {
+    let profile = sampleProfile()
+    let id = profile.id
+    let live = Box<AnyObject?>(nil)
+    let settled = Box<PVEInstanceState?>(nil)
+    let hasClient = Box<Bool?>(nil)
+
+    Task { @MainActor in
+        let coordinator = PVEFleetCoordinator(trustDelegate: nil,
+                                              secretProvider: { _ in "s" },
+                                              loadGuests: { _ in throw PVEError.unauthorized })
+        coordinator.setProfiles([profile])
+        coordinator.onChange = { state in
+            guard let current = state.instance(id)?.state, current != .signingIn else { return }
+            if case .failed = current { settled.value = current }
+        }
+        live.value = coordinator
+        coordinator.signIn(id)
+    }
+    waitOnMain { settled.value != nil }
+
+    Task { @MainActor in
+        hasClient.value = (live.value as? PVEFleetCoordinator)?.client(for: id) != nil
+    }
+    waitOnMain { hasClient.value != nil }
+    t.expectEqual(hasClient.value, false)
+}
+
+// MARK: - Re-entrancy
+
+t.test("signing in twice does not start the work twice") {
+    let profile = sampleProfile()
+    let id = profile.id
+    let live = Box<AnyObject?>(nil)
+    let attempts = Box<Int>(0)
+    let settled = Box<Bool>(false)
+
+    Task { @MainActor in
+        let coordinator = PVEFleetCoordinator(trustDelegate: nil,
+                                              secretProvider: { _ in "s" },
+                                              loadGuests: { _ in
+                                                  attempts.value += 1
+                                                  try? await Task.sleep(nanoseconds: 200_000_000)
+                                                  return [sampleGuest]
+                                              })
+        coordinator.setProfiles([profile])
+        coordinator.onChange = { state in
+            if case .signedIn = state.instance(id)?.state { settled.value = true }
+        }
+        live.value = coordinator
+        coordinator.signIn(id)
+        coordinator.signIn(id)   // the auto sign-in racing the user's button
+    }
+    waitOnMain { settled.value }
+    t.expectEqual(attempts.value, 1)
+}
+
+t.test("an explicitly typed secret still gets through while a sign-in is in flight") {
+    let profile = sampleProfile()
+    let id = profile.id
+    let live = Box<AnyObject?>(nil)
+    let attempts = Box<Int>(0)
+    let settled = Box<Bool>(false)
+
+    Task { @MainActor in
+        let coordinator = PVEFleetCoordinator(trustDelegate: nil,
+                                              secretProvider: { _ in "stored" },
+                                              loadGuests: { _ in
+                                                  attempts.value += 1
+                                                  return [sampleGuest]
+                                              })
+        coordinator.setProfiles([profile])
+        coordinator.onChange = { state in
+            if case .signedIn = state.instance(id)?.state { settled.value = true }
+        }
+        live.value = coordinator
+        coordinator.signIn(id)
+        coordinator.signIn(id, usingSecret: "typed")
+    }
+    // Wait on the attempt count, not on `.signedIn` — whichever attempt lands first
+    // settles the state, and stopping there would pass without the second ever running.
+    waitOnMain { attempts.value >= 2 }
+    _ = settled.value
+    t.expect(attempts.value >= 2, "a deliberate Sign In must not be swallowed by an automatic one, saw \(attempts.value)")
+}
+
+// MARK: - Bounding the wait for a network path
+
+t.test("a path that is still coming up is given its grace") {
+    let signal = PVEConnectivitySignal()
+    let start = Date()
+    signal.beganWaitingForPath()
+    t.expect(signal.hasWaitedWithoutPath(longerThan: 6, now: start.addingTimeInterval(2)) == false,
+             "two seconds without a path must not fail the request")
+}
+
+t.test("a path that never arrives stops the request instead of waiting out the resource timeout") {
+    let signal = PVEConnectivitySignal()
+    let start = Date()
+    signal.beganWaitingForPath()
+    t.expect(signal.hasWaitedWithoutPath(longerThan: 6, now: start.addingTimeInterval(7)),
+             "past the grace with no path, the request must give up")
+}
+
+t.test("reaching the server retires the short deadline, so a fingerprint dialog keeps the long one") {
+    let signal = PVEConnectivitySignal()
+    let start = Date()
+    signal.beganWaitingForPath()
+    signal.reachedServer()
+    t.expect(signal.hasWaitedWithoutPath(longerThan: 6, now: start.addingTimeInterval(600)) == false,
+             "a human at the trust prompt must not be cut off by the connectivity bound")
+}
+
+t.test("a request that never waited for a path is never failed for one") {
+    let signal = PVEConnectivitySignal()
+    t.expect(signal.hasWaitedWithoutPath(longerThan: 0, now: Date().addingTimeInterval(600)) == false,
+             "no wait was ever recorded, so there is nothing to give up on")
+}
+
+t.test("the verdict does not carry from one request into the next") {
+    let signal = PVEConnectivitySignal()
+    let start = Date()
+    signal.beganWaitingForPath()
+    signal.reset()
+    t.expect(signal.hasWaitedWithoutPath(longerThan: 6, now: start.addingTimeInterval(600)) == false,
+             "a reset signal must start the next request with a clean slate")
+}
+
+t.test("an error reads the same however it is presented") {
+    // `presentError` reaches for `description`, but the console window and any
+    // NSAlert built elsewhere use `localizedDescription`. They must not disagree.
+    let errors: [PVEError] = [
+        .unauthorized,
+        .invalidServer,
+        .transport("No network path to pve.example.com:8006."),
+        .spiceUnavailable(guest: "vm", reason: "no display"),
+    ]
+    for error in errors {
+        t.expectEqual(error.localizedDescription, error.description)
+        t.expect(error.localizedDescription.contains("couldn\u{2019}t be completed") == false,
+                 "\(error) still falls back to Foundation's generic wording")
+    }
+}
+
+// MARK: - Privileges that sign-in cannot tell you about
+
+t.test("a privilege granted on the guest itself counts") {
+    let payload = ["/vms/100": ["VM.Config.CDROM": 1]]
+    t.expect(PVEProtocol.grants("VM.Config.CDROM", forVMID: 100, in: payload),
+             "a grant on the guest's own ACL path must count")
+}
+
+t.test("a privilege granted on /vms or / covers the guest") {
+    t.expect(PVEProtocol.grants("VM.Config.CDROM", forVMID: 100, in: ["/vms": ["VM.Config.CDROM": 1]]),
+             "a grant on /vms must cover every guest")
+    t.expect(PVEProtocol.grants("VM.Config.CDROM", forVMID: 100, in: ["/": ["VM.Config.CDROM": 1]]),
+             "a grant on / must cover every guest")
+}
+
+t.test("a privilege on a different guest does not count") {
+    let payload = ["/vms/101": ["VM.Config.CDROM": 1]]
+    t.expect(PVEProtocol.grants("VM.Config.CDROM", forVMID: 100, in: payload) == false,
+             "a grant on VM 101 must not authorise VM 100")
+}
+
+t.test("a privilege present but zero is not granted") {
+    // Proxmox reports the whole privilege set, granted or not; a 0 is a denial.
+    let payload = ["/vms/100": ["VM.Config.CDROM": 0, "VM.Audit": 1]]
+    t.expect(PVEProtocol.grants("VM.Config.CDROM", forVMID: 100, in: payload) == false,
+             "a privilege reported as 0 is a denial, not a grant")
+}
+
+t.test("PVEVMUser does not include VM.Config.CDROM") {
+    // The trap this check exists for: a token with the stock role signs in, lists
+    // guests, and looks healthy right up to the point an ISO attach 403s.
+    let pveVMUser = ["/vms/100": ["VM.Audit": 1, "VM.Config.Disk": 1, "VM.Config.CDROM": 0,
+                                  "VM.Console": 1, "VM.PowerMgmt": 1]]
+    t.expect(PVEProtocol.grants("VM.PowerMgmt", forVMID: 100, in: pveVMUser),
+             "power actions are in the role and must stay offered")
+    t.expect(PVEProtocol.grants("VM.Config.CDROM", forVMID: 100, in: pveVMUser) == false,
+             "ISO must not be offered to a stock PVEVMUser token")
+}
+
+// MARK: - ISO attach and detach
+
+t.test("attaching an ISO writes the volume as a cdrom") {
+    t.expectEqual(PVEProtocol.cdromAttachValue(volumeID: "local:iso/debian-12.iso"),
+                  "local:iso/debian-12.iso,media=cdrom")
+}
+
+t.test("detaching leaves the drive present and empty") {
+    // Not a device deletion: a guest expects an empty drive after an eject.
+    t.expectEqual(PVEProtocol.cdromDetachValue(), "none,media=cdrom")
+}
+
+t.test("ISO volume IDs are read out of a storage content listing") {
+    let json = Data("""
+        {"data":[{"volid":"local:iso/ubuntu.iso","size":1},
+                 {"volid":"local:iso/debian-12.iso","size":2},
+                 {"size":3}]}
+        """.utf8)
+    t.expectEqual(try PVEProtocol.decodeISOVolumeIDs(json),
+                  ["local:iso/debian-12.iso", "local:iso/ubuntu.iso"])
+}
+
+t.test("only storages advertising iso content are searched") {
+    let json = Data("""
+        {"data":[{"storage":"local","content":"iso,vztmpl,backup"},
+                 {"storage":"local-lvm","content":"images,rootdir"},
+                 {"storage":"nas","content":"backup,iso"}]}
+        """.utf8)
+    t.expectEqual(try PVEProtocol.decodeStorages(advertising: "iso", from: json), ["local", "nas"])
+}
+
+t.test("a content type is matched whole, not as a substring") {
+    let json = Data(#"{"data":[{"storage":"s","content":"isos,images"}]}"#.utf8)
+    t.expect(try PVEProtocol.decodeStorages(advertising: "iso", from: json).isEmpty,
+             "“isos” is not “iso” and must not be searched for ISO images")
+}
+
+t.test("a volume ID reads as its filename in a menu") {
+    t.expectEqual(PVEProtocol.isoDisplayName(forVolumeID: "local:iso/debian-12.7-amd64.iso"),
+                  "debian-12.7-amd64.iso")
+    t.expectEqual(PVEProtocol.isoDisplayName(forVolumeID: "bare"), "bare")
+}
+
+t.test("storage and config paths encode a node name with a space") {
+    t.expectEqual(PVEProtocol.storageContentPath(node: "pve node", storage: "local", content: "iso"),
+                  "/api2/json/nodes/pve%20node/storage/local/content?content=iso")
+    t.expectEqual(PVEProtocol.configPath(node: "pve node", vmid: 100, kind: .qemu),
+                  "/api2/json/nodes/pve%20node/qemu/100/config")
+}
+
+t.test("an empty storage list is a privilege filter, not an empty node") {
+    // Proxmox filters /nodes/{node}/storage by Datastore.Audit and returns [] rather
+    // than 403. A real node always has at least one storage, so [] means "cannot see".
+    let json = Data(#"{"data":[]}"#.utf8)
+    t.expect(try PVEProtocol.decodeStorageNames(json).isEmpty,
+             "an empty payload must decode to no storages at all")
+    t.expect(try PVEProtocol.decodeStorages(advertising: "iso", from: json).isEmpty,
+             "and to no iso-capable storages either")
+}
+
+t.test("storages holding no ISOs are distinguishable from storages you cannot see") {
+    let json = Data(#"{"data":[{"storage":"local-lvm","content":"images,rootdir"}]}"#.utf8)
+    t.expectEqual(try PVEProtocol.decodeStorageNames(json), ["local-lvm"])
+    t.expect(try PVEProtocol.decodeStorages(advertising: "iso", from: json).isEmpty,
+             "a visible storage that holds no ISOs is still visible")
+}
+
+t.test("a guest's current CD-ROM is read back out of its config") {
+    let json = Data(#"{"data":{"ide2":"local:iso/debian-12.iso,media=cdrom","memory":2048,"name":"vm"}}"#.utf8)
+    t.expectEqual(try PVEProtocol.decodeConfigValue(json, key: "ide2"),
+                  "local:iso/debian-12.iso,media=cdrom")
+    t.expectEqual(try PVEProtocol.decodeConfigValue(json, key: "memory"), "2048")
+}
+
+t.test("a config key that is absent reads as nothing, not as an error") {
+    // A guest with no CD-ROM device simply has no ide2 key.
+    let json = Data(#"{"data":{"name":"vm"}}"#.utf8)
+    t.expectEqual(try PVEProtocol.decodeConfigValue(json, key: "ide2"), nil)
+}
+
+t.test("the mounted ISO is read out of what Proxmox writes back, not what was sent") {
+    // Confirmed live: attaching local:iso/x.iso,media=cdrom comes back with a size= the
+    // caller never wrote, so an equality check against the sent value would never match.
+    t.expectEqual(PVEProtocol.attachedISOVolumeID(
+        fromCDROMValue: "local:iso/en_windows_xp.iso,media=cdrom,size=632640K"),
+        "local:iso/en_windows_xp.iso")
+    t.expectEqual(PVEProtocol.attachedISOVolumeID(
+        fromCDROMValue: "local:iso/x.iso,media=cdrom"), "local:iso/x.iso")
+}
+
+t.test("an empty drive is not a mounted volume") {
+    t.expectEqual(PVEProtocol.attachedISOVolumeID(fromCDROMValue: "none,media=cdrom"), nil)
+    t.expectEqual(PVEProtocol.attachedISOVolumeID(fromCDROMValue: nil), nil)
+    t.expectEqual(PVEProtocol.attachedISOVolumeID(fromCDROMValue: ""), nil)
+}
+
+// MARK: - One definition of "ready to sign in"
+
+t.test("a complete profile has no problem to report") {
+    var profile = PVEServerProfile(label: "Home", host: "10.0.0.1", port: 8006)
+    profile.tokenID = "root@pam!spicemac"
+    t.expectEqual(profile.completenessProblem, nil)
+    t.expect(profile.isComplete, "a token profile with host and token ID is ready")
+}
+
+t.test("a missing host is named as the missing host") {
+    var profile = PVEServerProfile(label: "Home", host: "   ")
+    profile.tokenID = "root@pam!spicemac"
+    t.expectEqual(profile.completenessProblem, "Enter the Proxmox server address.")
+}
+
+t.test("a token ID missing its realm or token name is named as such") {
+    // The trap: "root" looks like a username and is accepted by every field check.
+    var profile = PVEServerProfile(label: "Home", host: "10.0.0.1")
+    profile.tokenID = "root"
+    t.expectEqual(profile.completenessProblem, "Enter a full API token ID, e.g. root@pam!spicemac.")
+    profile.tokenID = "root@pam"
+    t.expectEqual(profile.completenessProblem, "Enter a full API token ID, e.g. root@pam!spicemac.")
+}
+
+t.test("password auth wants a username, not a token ID") {
+    var profile = PVEServerProfile(label: "Home", host: "10.0.0.1")
+    profile.authKind = .password
+    profile.username = "  "
+    t.expectEqual(profile.completenessProblem, "Enter a username.")
+    profile.username = "root"
+    t.expectEqual(profile.completenessProblem, nil)
+}
+
+t.test("isComplete and the reported problem cannot disagree") {
+    // isComplete is derived from the message, so a future edit to one carries the other.
+    var profile = PVEServerProfile(label: "Home", host: "")
+    for (host, tokenID) in [("", "root@pam!x"), ("h", "root"), ("h", "root@pam!x")] {
+        profile.host = host
+        profile.tokenID = tokenID
+        t.expectEqual(profile.isComplete, profile.completenessProblem == nil)
+    }
+}
+
+// MARK: - Bringing a whole fleet online
+
+t.test("signing in the fleet retries a server that failed, not just untouched ones") {
+    // A node that was briefly down, or a password fixed since, leaves the instance in
+    // .failed. Skipping those means the fleet stays permanently half-connected: nothing
+    // short of a manual per-row Sign In ever brings it back.
+    let a = sampleProfile(host: "10.0.0.1")
+    let b = sampleProfile(host: "10.0.0.2")
+    let live = Box<AnyObject?>(nil)
+    let attempts = Box<Int>(0)
+    let aState = Box<String?>(nil)
+
+    Task { @MainActor in
+        let coordinator = PVEFleetCoordinator(trustDelegate: nil,
+                                              secretProvider: { _ in "s" },
+                                              loadGuests: { client in
+                                                  attempts.value += 1
+                                                  // 10.0.0.1 fails on the first pass, then works.
+                                                  if client.server.host == "10.0.0.1", attempts.value <= 2 {
+                                                      throw PVEError.unauthorized
+                                                  }
+                                                  return [sampleGuest]
+                                              })
+        coordinator.setProfiles([a, b])
+        coordinator.onChange = { state in
+            switch state.instance(a.id)?.state {
+            case .signedIn: aState.value = "signedIn"
+            case .failed: aState.value = "failed"
+            default: break
+            }
+        }
+        live.value = coordinator
+        coordinator.signInAll()
+    }
+    waitOnMain { aState.value == "failed" }
+    t.expectEqual(aState.value, "failed")
+
+    Task { @MainActor in (live.value as? PVEFleetCoordinator)?.signInAll() }
+    waitOnMain { aState.value == "signedIn" }
+    t.expectEqual(aState.value, "signedIn")
+}
+
+t.test("signing in the fleet leaves an already signed-in server alone") {
+    // Retrying a healthy server would cost a needless request and, worse, a Keychain
+    // prompt on a build the Keychain does not know.
+    let a = sampleProfile(host: "10.0.0.1")
+    let live = Box<AnyObject?>(nil)
+    let attempts = Box<Int>(0)
+    let signedIn = Box<Bool>(false)
+
+    Task { @MainActor in
+        let coordinator = PVEFleetCoordinator(trustDelegate: nil,
+                                              secretProvider: { _ in "s" },
+                                              loadGuests: { _ in
+                                                  attempts.value += 1
+                                                  return [sampleGuest]
+                                              })
+        coordinator.setProfiles([a])
+        coordinator.onChange = { state in
+            if case .signedIn = state.instance(a.id)?.state { signedIn.value = true }
+        }
+        live.value = coordinator
+        coordinator.signInAll()
+    }
+    waitOnMain { signedIn.value }
+
+    let after = Box<Int?>(nil)
+    Task { @MainActor in
+        (live.value as? PVEFleetCoordinator)?.signInAll()
+        after.value = attempts.value
+    }
+    waitOnMain { after.value != nil }
+    t.expectEqual(after.value, 1)
+}
+
+// MARK: - Saying something about the fleet, not just one server
+
+func fleet(_ states: [(String, PVEInstanceState)]) -> PVEFleetState {
+    PVEFleetState(instances: states.map { name, state in
+        PVEInstanceSnapshot(profile: PVEServerProfile(label: name, host: "h"), state: state)
+    })
+}
+
+t.test("a single server needs no fleet summary — the line above already says it") {
+    t.expectEqual(fleet([("Home", .signedIn([]))]).connectionSummary, nil)
+    t.expectEqual(fleet([]).connectionSummary, nil)
+}
+
+t.test("a fleet that is all up says so") {
+    t.expectEqual(fleet([("A", .signedIn([])), ("B", .signedIn([]))]).connectionSummary,
+                  "All 2 servers connected.")
+}
+
+t.test("a failed server is named while it is the only one failing") {
+    // The case the summary exists for: the status line can read "Signed in to A" and
+    // look entirely healthy while B is unreachable, because B's failure lives only on
+    // B's own row further down the tree.
+    t.expectEqual(fleet([("A", .signedIn([])), ("B", .failed(.unauthorized))]).connectionSummary,
+                  "1 of 2 servers connected. B failed.")
+}
+
+t.test("several failures are counted rather than listed") {
+    let summary = fleet([("A", .signedIn([])),
+                         ("B", .failed(.unauthorized)),
+                         ("C", .failed(.invalidServer))]).connectionSummary
+    t.expectEqual(summary, "1 of 3 servers connected. 2 failed.")
+}
+
+t.test("a sign-in still in flight is reported as in flight, not as a failure") {
+    t.expectEqual(fleet([("A", .signedIn([])), ("B", .signingIn)]).connectionSummary,
+                  "1 of 2 servers connected. 1 still signing in…")
+}
+
+t.test("the spinner belongs to the fleet, not to one server") {
+    t.expect(fleet([("A", .signedIn([])), ("B", .signingIn)]).isAnySigningIn,
+             "a server still signing in must keep the spinner going")
+    t.expect(fleet([("A", .signedIn([])), ("B", .failed(.unauthorized))]).isAnySigningIn == false,
+             "nothing in flight means nothing to spin for")
+}
+
+// MARK: - Filtering a fleet by server name
+
+func fleetWithGuests() -> PVEFleetState {
+    PVEFleetState(instances: [
+        PVEInstanceSnapshot(profile: PVEServerProfile(label: "Home", host: "10.0.0.1"),
+                            state: .signedIn([PVEGuest(vmid: 100, name: "Netbird-router", node: "virtual1", status: "running", kind: .qemu),
+                                              PVEGuest(vmid: 102, name: "OpnSense", node: "virtual1", status: "running", kind: .qemu)])),
+        PVEInstanceSnapshot(profile: PVEServerProfile(label: "Rack B", host: "10.0.0.2"),
+                            state: .signedIn([PVEGuest(vmid: 200, name: "build-agent", node: "rack-1", status: "running", kind: .qemu)])),
+    ])
+}
+
+t.test("searching a server name shows that server's guests, not an empty row") {
+    // The whole point of filtering to a site is to see what is on it. Returning the row
+    // with nothing under it is worse than no match at all.
+    let matches = fleetWithGuests().instances(matching: "Home")
+    t.expectEqual(matches.count, 1)
+    t.expectEqual(matches.first?.guests.count, 2)
+    t.expectEqual(matches.first?.guests.map(\.name), ["Netbird-router", "OpnSense"])
+}
+
+t.test("searching a server's host does the same as its name") {
+    let matches = fleetWithGuests().instances(matching: "10.0.0.2")
+    t.expectEqual(matches.count, 1)
+    t.expectEqual(matches.first?.guests.map(\.name), ["build-agent"])
+}
+
+t.test("searching a guest name narrows to that guest, keeping its server") {
+    let matches = fleetWithGuests().instances(matching: "opn")
+    t.expectEqual(matches.count, 1)
+    t.expectEqual(matches.first?.instance.profile.label, "Home")
+    t.expectEqual(matches.first?.guests.map(\.name), ["OpnSense"])
+}
+
+t.test("a query matching nothing matches nothing") {
+    t.expect(fleetWithGuests().instances(matching: "zzz").isEmpty,
+             "an unmatched query must not keep servers around")
+}
+
+t.test("an empty query shows the whole fleet") {
+    let matches = fleetWithGuests().instances(matching: "  ")
+    t.expectEqual(matches.count, 2)
+    t.expectEqual(matches.map { $0.guests.count }, [2, 1])
+}
+
+t.test("a matching server with no guests still shows") {
+    // A server that failed, or is still signing in, has no guests to list — hiding it
+    // would hide the very thing that was searched for.
+    let state = PVEFleetState(instances: [
+        PVEInstanceSnapshot(profile: PVEServerProfile(label: "Rack B", host: "10.0.0.2"),
+                            state: .failed(.unauthorized)),
+    ])
+    t.expectEqual(state.instances(matching: "rack").count, 1)
+    t.expectEqual(state.instances(matching: "rack").first?.guests.count, 0)
+}
+
+t.test("the flat picker and the tree agree, because they share the rule") {
+    let flat = fleetWithGuests().guests(matching: "Home")
+    t.expectEqual(flat.map(\.guest.name), ["Netbird-router", "OpnSense"])
 }
 
 t.finishAndExit()

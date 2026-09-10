@@ -81,7 +81,7 @@ public struct PVEGuest: Equatable, Sendable, Identifiable {
     }
 }
 
-public enum PVEError: Error, Equatable, CustomStringConvertible {
+public enum PVEError: LocalizedError, Equatable, CustomStringConvertible {
     case invalidServer
     case malformedTokenID(String)
     case http(status: Int, body: String)
@@ -141,4 +141,39 @@ public enum PVEError: Error, Equatable, CustomStringConvertible {
             return message
         }
     }
+
+    /// Without this, `localizedDescription` on a `PVEError` is Foundation's generic
+    /// "The operation couldn't be completed. (… error N.)" — which is what reaches any
+    /// presenter that does not know to reach for `description` first.
+    public var errorDescription: String? { description }
+}
+
+/// An ISO image available to attach to a guest.
+public struct PVEISOImage: Equatable, Sendable, Identifiable {
+    public let volumeID: String
+    public let storage: String
+
+    public var id: String { volumeID }
+    /// `local:iso/debian-12.iso` reads as `debian-12.iso`.
+    public var displayName: String { PVEProtocol.isoDisplayName(forVolumeID: volumeID) }
+
+    public init(volumeID: String, storage: String) {
+        self.volumeID = volumeID
+        self.storage = storage
+    }
+}
+
+/// What the CD-ROM menu can actually offer, and why when the answer is nothing.
+///
+/// Proxmox filters `/nodes/{node}/storage` by `Datastore.Audit` and returns an empty
+/// array rather than a 403 — the same trap as the guest list, where "no rights" and
+/// "nothing there" look identical. A menu saying "No ISO images found" to someone whose
+/// node is full of them sends them looking in the wrong place.
+public enum PVEISOAvailability: Equatable, Sendable {
+    case images([PVEISOImage])
+    /// The node reported no storage at all. A Proxmox node always has at least one, so
+    /// this is a privilege filter rather than an empty cluster.
+    case noStorageVisible
+    /// Storages are visible; none of them hold ISO images.
+    case noImages
 }

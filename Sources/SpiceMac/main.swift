@@ -12,6 +12,6 @@ if CommandLine.arguments.contains("--ui-check") {
 }
 
 app.setActivationPolicy(.regular)
-let delegate = AppDelegate()
+let delegate = MainActor.assumeIsolated { AppDelegate() }
 app.delegate = delegate
 app.run()

@@ -50,11 +50,6 @@ private final class PVEFleetGuestRow: NSObject {
     }
 }
 
-private extension PVEInstanceState {
-    var isSignedIn: Bool { if case .signedIn = self { return true }; return false }
-    var isFailed: Bool { if case .failed = self { return true }; return false }
-}
-
 /// The Proxmox browser: sign in to one or more nodes, then pick a guest and open its
 /// console.
 ///
@@ -71,20 +66,24 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
     /// Called to open a `.vv` file instead of signing in.
     var onOpenVVFile: (() -> Void)?
 
-    private let hostField = NSTextField()
-    private let portField = NSTextField()
-    private let authSelector = NSSegmentedControl(labels: ["API Token", "Username & Password"],
-                                                  trackingMode: .selectOne, target: nil, action: nil)
-    private let tokenIDField = NSTextField()
-    private let tokenSecretField = NSSecureTextField()
-    private let usernameField = NSTextField()
-    private let realmPopUp = NSPopUpButton()
-    private let passwordField = NSSecureTextField()
-    private let rememberCheckbox = NSButton(checkboxWithTitle: "Remember in Keychain", target: nil, action: nil)
+    /// Called to open Manage Servers — the one place a server is added or edited.
+    var onManageServers: (() -> Void)?
 
-    private let connectButton = NSButton(title: "Sign In", target: nil, action: nil)
+    private let manageServersButton = NSButton(title: "Manage Servers…", target: nil, action: nil)
+    /// Shown over the tree when no server is configured. Without it a fresh install is a
+    /// blank list with no hint that Manage Servers is where a server comes from.
+    /// Whether a local action (starting a guest, a power command) is in flight. Sign-ins
+    /// are read from the fleet instead, so the two cannot fight over the spinner.
+    private var isBusy = false
+    private var spinnerIsAnimating = false
+    private let emptyFleetLabel = NSTextField(labelWithString: "No servers configured.")
+    private let addServerButton = NSButton(title: "Add a Server…", target: nil, action: nil)
+    private var emptyFleetView: NSStackView!
     private let openVVButton = NSButton(title: "Open .vv File…", target: nil, action: nil)
     private let statusLabel = NSTextField(labelWithString: "")
+    /// Fleet health, under the transient status line. Hidden with a single server, where
+    /// the rows below already say everything there is to say.
+    private let fleetLabel = NSTextField(labelWithString: "")
     private let spinner = NSProgressIndicator()
 
     private let searchField = NSSearchField()
@@ -94,28 +93,8 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
     private let contextMenu = NSMenu()
     private let outlineView = NSOutlineView()
 
-    private var formGrid: NSGridView!
-    private var tokenRows: [NSGridRow] = []
-    private var passwordRows: [NSGridRow] = []
-    private var allFormRows: [NSGridRow] = []
-    private var isSignedIn = false
-
     private static let log = Logger(subsystem: "org.spicemac.SpiceMac", category: "proxmox")
 
-    /// The secret as loaded from the Keychain. Rewriting an unchanged secret costs a
-    /// second authorization prompt for no benefit, so persist only real changes.
-    private var loadedSecret: String?
-    /// The stored profile the fields were last populated from, so a fleet change can
-    /// be told apart from one this form already reflects.
-    private var formProfile: PVEServerProfile?
-    /// The profile the credentials form above edits — always the fleet's first slot.
-    /// Everything else in the window (the tree, sign-in-all-on-reveal) is driven by
-    /// the coordinator across every configured server, not just this one.
-    private var primaryProfileID: UUID?
-    /// Set by `connect()` while a form-driven sign-in is in flight, so the coordinator's
-    /// eventual success/failure can decide whether to persist — a mistyped secret must
-    /// never overwrite a working one in the Keychain.
-    private var pendingPrimaryPersist: (id: UUID, profile: PVEServerProfile, secret: String)?
 
     /// Row wrappers, reused across reloads by id so `NSOutlineView` keeps expansion
     /// and selection state stable even though the coordinator hands us fresh struct
@@ -135,16 +114,18 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
     private var diagnosedInstances: Set<UUID> = []
 
     /// Drives sign-in across the whole fleet: one client per configured server,
-    /// folded into a tree instead of this window showing only the first one.
-    private let coordinator: PVEFleetCoordinator
+    /// folded into a tree instead of this window showing only the first one. Shared with
+    /// the console overlays, so signing in here lights those up too.
+    private let session: PVEFleetSession
+    private var coordinator: PVEFleetCoordinator { session.coordinator }
+    private var fleetObservation: PVEFleetSession.Token?
 
     // MARK: - Lifecycle
 
-    init() {
-        coordinator = PVEFleetCoordinator(
-            trustDelegate: PVEProfileStore.shared,
-            secretProvider: { PVEProfileStore.shared.secret(for: $0) },
-            secretPrompt: { profile in await MainActor.run { PVESecretPrompt.ask(for: profile) } })
+    /// The session is a parameter so `UICheck` can drive a fleet whose guests arrive
+    /// without a server. Everything in the app passes `.shared`.
+    init(session: PVEFleetSession) {
+        self.session = session
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 580),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable],
                               backing: .buffered,
@@ -163,24 +144,14 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
         super.init(window: window)
         window.delegate = self
         buildUI()
-        loadProfile()
-        coordinator.onChange = { [weak self] state in self?.handleFleetStateChanged(state) }
-        // Populate the fleet from whatever is already on disk — Manage Servers only
-        // reports changes when the user saves there, so without this the tree stays
-        // empty until that sheet is opened once.
-        coordinator.setProfiles(PVEProfileStore.shared.profiles)
+        fleetObservation = session.observe { [weak self] state in self?.handleFleetStateChanged(state) }
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
     /// Forwarded from the Manage Servers sheet.
     func setProfiles(_ profiles: [PVEServerProfile]) {
-        coordinator.setProfiles(profiles)
-        // The credentials form is a view onto the fleet's first slot. If the sheet
-        // changed that slot, the fields — and `loadedSecret` — still hold pre-sheet
-        // values, and the next Sign In would write them straight back over the edit.
-        if profiles.first != formProfile { loadProfile() }
-        primaryProfileID = profiles.first?.id
+        session.setProfiles(profiles)
     }
 
     /// Show the window, then bring the tree up to date: refresh the instance behind
@@ -191,87 +162,54 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         guard autoConnect else { return }
-        if let id = currentSelectionInstanceID() {
+        connectOnReveal()
+    }
+
+    /// What a reveal costs: one refresh for the server being looked at, and a sign-in
+    /// for every server that is not connected.
+    ///
+    /// These are two different jobs and it used to do only one of them. A selection meant
+    /// refresh-and-nothing-else, and without one it signed in the fleet *only while
+    /// nothing was signed in yet* — so the moment one server came up, the rest could
+    /// never join it. With several servers configured that left the fleet permanently
+    /// part-connected, and the tree showed no reason why.
+    ///
+    /// Split out from `present` so it can be checked without putting a window on screen.
+    func connectOnReveal() {
+        if let id = currentSelectionInstanceID(), coordinator.state.instance(id)?.state.isSignedIn == true {
             coordinator.refresh(id)
-        } else if coordinator.state.instances.contains(where: { $0.state.isSignedIn }) == false {
-            coordinator.signInAll()
         }
+        coordinator.signInAll()
     }
 
     // MARK: - Building
 
     private func buildUI() {
-        for field in [hostField, portField, tokenIDField, usernameField] {
-            field.isEditable = true
-            field.isBordered = true
-            field.bezelStyle = .roundedBezel
-        }
-        hostField.placeholderString = "proxmox.example.com"
-        portField.placeholderString = "8006"
-        portField.formatter = onlyDigitsFormatter()
-        tokenIDField.placeholderString = "root@pam!spicemac"
-        tokenSecretField.placeholderString = "token secret (UUID)"
-        usernameField.placeholderString = "root"
-        passwordField.placeholderString = "password"
-        realmPopUp.addItems(withTitles: ["pam", "pve"])
-
-        authSelector.target = self
-        authSelector.action = #selector(authKindChanged)
-        authSelector.selectedSegment = 0
-
-        connectButton.target = self
-        connectButton.action = #selector(connect(_:))
-        connectButton.keyEquivalent = "\r"
-        connectButton.bezelStyle = .rounded
-
-        rememberCheckbox.state = .on
         statusLabel.textColor = .secondaryLabelColor
         statusLabel.lineBreakMode = .byTruncatingTail
         statusLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
+        fleetLabel.textColor = .secondaryLabelColor
+        fleetLabel.lineBreakMode = .byTruncatingTail
+        fleetLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        fleetLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        fleetLabel.isHidden = true
+
+        // Spinning, small, and gone when idle — a stopped bar indicator left on screen
+        // reads as a broken progress bar rather than as nothing happening.
         spinner.style = .spinning
         spinner.controlSize = .small
         spinner.isDisplayedWhenStopped = false
-
-        let grid = NSGridView(views: [
-            [NSTextField(labelWithString: "Server:"), hostField,
-             NSTextField(labelWithString: "Port:"), portField],
-            [NSTextField(labelWithString: "Sign in with:"), authSelector],
-            [NSTextField(labelWithString: "Token ID:"), tokenIDField],
-            [NSTextField(labelWithString: "Secret:"), tokenSecretField],
-            [NSTextField(labelWithString: "Username:"), usernameField,
-             NSTextField(labelWithString: "Realm:"), realmPopUp],
-            [NSTextField(labelWithString: "Password:"), passwordField],
-            [NSGridCell.emptyContentView, rememberCheckbox],
-        ])
-        grid.column(at: 0).xPlacement = .trailing
-        grid.rowSpacing = 8
-        grid.columnSpacing = 8
-        // No fixed column width: this window shares a frame with consoles sized to their
-        // guests, so its content must stretch to whatever it is given rather than
-        // asserting a preferred width the frame then has to satisfy.
-        // Low hugging so fields stretch with the window; compression resistance stays
-        // HIGH so they cannot be squeezed away — lowering it collapses the window to a
-        // sliver, since nothing else resists.
-        for field in [hostField, tokenIDField, tokenSecretField, usernameField, passwordField] {
-            field.setContentHuggingPriority(.defaultLow, for: .horizontal)
-            field.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
-        }
-        hostField.widthAnchor.constraint(greaterThanOrEqualToConstant: 240).isActive = true
-        grid.mergeCells(inHorizontalRange: NSRange(location: 1, length: 3), verticalRange: NSRange(location: 1, length: 1))
-        grid.mergeCells(inHorizontalRange: NSRange(location: 1, length: 3), verticalRange: NSRange(location: 2, length: 1))
-        grid.mergeCells(inHorizontalRange: NSRange(location: 1, length: 3), verticalRange: NSRange(location: 3, length: 1))
-        grid.mergeCells(inHorizontalRange: NSRange(location: 1, length: 3), verticalRange: NSRange(location: 5, length: 1))
-        formGrid = grid
-        tokenRows = [grid.row(at: 2), grid.row(at: 3)]
-        passwordRows = [grid.row(at: 4), grid.row(at: 5)]
-        allFormRows = (0..<grid.numberOfRows).map { grid.row(at: $0) }
 
         openVVButton.target = self
         openVVButton.action = #selector(openVVFile(_:))
         openVVButton.bezelStyle = .rounded
 
-        let actionRow = NSStackView(views: [statusLabel, NSView(), spinner, openVVButton, connectButton])
+        manageServersButton.target = self
+        manageServersButton.action = #selector(manageServersTapped(_:))
+        manageServersButton.bezelStyle = .rounded
+
+        let actionRow = NSStackView(views: [statusLabel, NSView(), spinner, openVVButton, manageServersButton])
         actionRow.orientation = .horizontal
         actionRow.spacing = 8
         actionRow.setHuggingPriority(.defaultLow, for: .horizontal)
@@ -292,6 +230,18 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
 
         configureOutline()
         let scrollView = NSScrollView()
+        emptyFleetLabel.textColor = .secondaryLabelColor
+        emptyFleetLabel.alignment = .center
+        addServerButton.target = self
+        addServerButton.action = #selector(manageServersTapped(_:))
+        addServerButton.bezelStyle = .rounded
+        let emptyState = NSStackView(views: [emptyFleetLabel, addServerButton])
+        emptyState.orientation = .vertical
+        emptyState.spacing = 10
+        emptyState.translatesAutoresizingMaskIntoConstraints = false
+        emptyState.isHidden = true
+        emptyFleetView = emptyState
+
         scrollView.documentView = outlineView
         scrollView.hasVerticalScroller = true
         scrollView.borderType = .bezelBorder
@@ -317,13 +267,13 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
         // the view must not grow past its intrinsic height, and AppKit propagates that
         // to the window — `_changeWindowFrameFromConstraintsIfNecessary` then resizes
         // the frame to obey it, which is what was shrinking the tab group.
-        for view in [grid as NSView, actionRow, separator, listHeader, footer] {
+        for view in [actionRow as NSView, fleetLabel, separator, listHeader, footer] {
             view.setContentHuggingPriority(.defaultHigh, for: .vertical)
             view.setContentCompressionResistancePriority(.defaultHigh, for: .vertical)
         }
         scrollView.setContentHuggingPriority(.defaultLow, for: .vertical)
 
-        let root = NSStackView(views: [grid, actionRow, separator, listHeader, scrollView, footer])
+        let root = NSStackView(views: [actionRow, fleetLabel, separator, listHeader, scrollView, footer])
         root.orientation = .vertical
         root.alignment = .leading
         root.spacing = 12
@@ -364,25 +314,20 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
             panelStretch,
         ]
         // Rows follow the panel, not the window, so hiding the form cannot collapse them.
-        for view in [actionRow as NSView, separator, listHeader, scrollView, footer] {
+        for view in [actionRow as NSView, fleetLabel, separator, listHeader, scrollView, footer] {
             constraints.append(view.widthAnchor.constraint(equalTo: root.widthAnchor))
         }
-        // The grid is the one row whose own width legitimately falls to zero: signing in
-        // hides every credentials row, and an all-rows-hidden NSGridView has no content
-        // left to be wide. Tying that to the panel at required priority lets the collapse
-        // propagate outwards — it outranks `panelWidth`'s 999 and drags the panel down to
-        // a sliver, taking the filter field and the guest tree with it. Nothing is
-        // unsatisfiable, so Auto Layout never reports it. Below 999 the grid still
-        // stretches to fill the panel but can no longer shrink it.
-        let gridWidth = grid.widthAnchor.constraint(equalTo: root.widthAnchor)
-        gridWidth.priority = .defaultHigh
-        constraints.append(gridWidth)
+        contentView.addSubview(emptyFleetView)
+        NSLayoutConstraint.activate([
+            emptyFleetView.centerXAnchor.constraint(equalTo: scrollView.centerXAnchor),
+            emptyFleetView.centerYAnchor.constraint(equalTo: scrollView.centerYAnchor),
+        ])
+
         let listFloor = scrollView.heightAnchor.constraint(greaterThanOrEqualToConstant: 160)
         listFloor.priority = .defaultHigh               // shrinks rather than forcing the window taller
         constraints.append(listFloor)
         NSLayoutConstraint.activate(constraints)
 
-        authKindChanged()
     }
 
     private func configureOutline() {
@@ -420,115 +365,7 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
         outlineView.doubleAction = #selector(outlineDoubleClicked(_:))
     }
 
-    private func onlyDigitsFormatter() -> NumberFormatter {
-        let formatter = NumberFormatter()
-        formatter.numberStyle = .none
-        formatter.allowsFloats = false
-        formatter.minimum = 1
-        formatter.maximum = 65535
-        return formatter
-    }
-
     // MARK: - Profile
-
-    private func loadProfile() {
-        formProfile = PVEProfileStore.shared.profiles.first
-        let profile = formProfile ?? PVEServerProfile()
-        primaryProfileID = formProfile?.id
-        loadedSecret = nil
-        // Cleared unconditionally: reloading onto a server with nothing stored would
-        // otherwise leave the previous server's secret sitting in the field.
-        tokenSecretField.stringValue = ""
-        passwordField.stringValue = ""
-        hostField.stringValue = profile.host
-        portField.stringValue = String(profile.port)
-        tokenIDField.stringValue = profile.tokenID
-        usernameField.stringValue = profile.username
-        realmPopUp.selectItem(withTitle: profile.realm)
-        rememberCheckbox.state = profile.rememberSecret ? .on : .off
-        authSelector.selectedSegment = profile.authKind == .apiToken ? 0 : 1
-        authKindChanged()
-
-        if profile.rememberSecret, profile.isComplete,
-           let secret = PVEProfileStore.shared.secret(for: profile) {
-            loadedSecret = secret
-            if profile.authKind == .apiToken {
-                tokenSecretField.stringValue = secret
-            } else {
-                passwordField.stringValue = secret
-            }
-        }
-    }
-
-    /// Starts from the stored first profile (if any) so its `id` and `label` survive
-    /// a save — this form only edits that one slot, it must not fork a new identity
-    /// for it on every Sign In.
-    private func currentProfile() -> PVEServerProfile {
-        var profile = PVEProfileStore.shared.profiles.first ?? PVEServerProfile()
-        profile.host = hostField.stringValue.trimmingCharacters(in: .whitespaces)
-        profile.port = Int(portField.stringValue) ?? 8006
-        profile.authKind = authSelector.selectedSegment == 0 ? .apiToken : .password
-        profile.tokenID = tokenIDField.stringValue.trimmingCharacters(in: .whitespaces)
-        profile.username = usernameField.stringValue.trimmingCharacters(in: .whitespaces)
-        profile.realm = realmPopUp.titleOfSelectedItem ?? "pam"
-        profile.rememberSecret = rememberCheckbox.state == .on
-        return profile
-    }
-
-    private func currentSecret() -> String {
-        authSelector.selectedSegment == 0 ? tokenSecretField.stringValue : passwordField.stringValue
-    }
-
-    @objc private func authKindChanged() {
-        guard isSignedIn == false else { return }
-        let usingToken = authSelector.selectedSegment == 0
-        for row in tokenRows { row.isHidden = !usingToken }
-        for row in passwordRows { row.isHidden = usingToken }
-    }
-
-    /// Once signed in the credentials are just clutter above the thing the user came
-    /// for, so fold them away and give the space to the guest tree.
-    private func setSignedIn(_ signedIn: Bool) {
-        isSignedIn = signedIn
-        if signedIn {
-            for row in allFormRows { row.isHidden = true }
-            connectButton.title = "Sign Out"
-            openVVButton.isHidden = true
-        } else {
-            for row in allFormRows { row.isHidden = false }
-            connectButton.title = "Sign In"
-            openVVButton.isHidden = false
-            authKindChanged()
-        }
-    }
-
-    /// Reflects the primary profile's fleet state onto the credentials form. A
-    /// sign-in failure shows on the form (this is the one server the user is looking
-    /// straight at) — every other server's failure shows on its own tree row instead.
-    private func updatePrimaryFormState() {
-        guard let id = primaryProfileID, let instance = coordinator.state.instance(id) else {
-            setBusy(false, message: nil)
-            setSignedIn(false)
-            return
-        }
-        switch instance.state {
-        case .signedOut:
-            setBusy(false, message: nil)
-            setSignedIn(false)
-            showStatus("", isError: false)
-        case .signingIn:
-            setBusy(true, message: "Signing in to \(instance.profile.host)…")
-        case .signedIn:
-            setBusy(false, message: nil)
-            setSignedIn(true)
-            showStatus("Signed in to \(instance.profile.host) as \(instance.profile.credentials(secret: "").displayUser).",
-                       isError: false)
-        case .failed(let error):
-            setBusy(false, message: nil)
-            setSignedIn(false)
-            showStatus("Sign-in failed: \(error.description)", isError: true)
-        }
-    }
 
     // MARK: - Actions
 
@@ -536,77 +373,8 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
         onOpenVVFile?()
     }
 
-    @objc private func connect(_ sender: Any?) {
-        if isSignedIn {
-            if let id = primaryProfileID { coordinator.signOut(id) }
-            return
-        }
-        let profile = currentProfile()
-        let secret = currentSecret()
-
-        guard profile.isComplete else {
-            showStatus(profile.host.isEmpty
-                       ? "Enter the Proxmox server address."
-                       : "Enter a full API token ID, e.g. root@pam!spicemac.", isError: true)
-            return
-        }
-        guard secret.isEmpty == false else {
-            showStatus(profile.authKind == .apiToken ? "Enter the token secret." : "Enter the password.",
-                       isError: true)
-            return
-        }
-
-        primaryProfileID = profile.id
-        pendingPrimaryPersist = (id: profile.id, profile: profile, secret: secret)
-        coordinator.setProfiles(updatedProfiles(with: profile))
-        coordinator.signIn(profile.id, usingSecret: secret)
-    }
-
-    /// The stored profile list with `profile` in the first slot, without writing it to
-    /// disk — used to tell the coordinator about an edit before it's confirmed to work.
-    private func updatedProfiles(with profile: PVEServerProfile) -> [PVEServerProfile] {
-        var profiles = PVEProfileStore.shared.profiles
-        if profiles.isEmpty {
-            profiles = [profile]
-        } else {
-            profiles[0] = profile
-        }
-        return profiles
-    }
-
-    private func persist(profile: PVEServerProfile, secret: String) {
-        let previous = PVEProfileStore.shared.profiles.first
-        let updated = updatedProfiles(with: profile)
-        PVEProfileStore.shared.profiles = updated
-        formProfile = updated.first
-
-        // Editing the host, port or token moves the Keychain account and the pinned
-        // certificate along with it. Left behind, the old item is an orphan nothing can
-        // reach, and the old pin keeps a host we no longer use auto-trusted.
-        var accountMoved = false
-        if let previous, previous.id == profile.id {
-            accountMoved = previous.keychainAccount != profile.keychainAccount
-            if accountMoved,
-               updated.contains(where: { $0.keychainAccount == previous.keychainAccount }) == false {
-                PVEKeychain.delete(account: previous.keychainAccount)
-            }
-            if previous.host.isEmpty == false,
-               previous.host.caseInsensitiveCompare(profile.host) != .orderedSame,
-               updated.contains(where: { $0.host.caseInsensitiveCompare(previous.host) == .orderedSame }) == false {
-                PVEProfileStore.shared.forgetPin(forHost: previous.host)
-            }
-        }
-
-        guard profile.rememberSecret else {
-            PVEKeychain.delete(account: profile.keychainAccount)
-            loadedSecret = nil
-            return
-        }
-        // Rewriting an unchanged secret costs a second Keychain authorization prompt —
-        // but a moved account has nothing stored under its new name yet.
-        guard accountMoved || secret != loadedSecret else { return }
-        PVEProfileStore.shared.setSecret(secret, for: profile)
-        loadedSecret = secret
+    @objc private func manageServersTapped(_ sender: Any?) {
+        onManageServers?()
     }
 
     @objc private func refresh(_ sender: Any?) {
@@ -658,19 +426,26 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
         }
     }
 
+    private static func describe(_ state: PVEInstanceState) -> String {
+        switch state {
+        case .signedOut: return "signedOut"
+        case .signingIn: return "signingIn"
+        case .signedIn(let guests): return "signedIn(\(guests.count) guests)"
+        case .failed(let error): return "failed(\(error))"
+        }
+    }
+
     // MARK: - Layout probe
 
-    /// Test seam for `UICheck`. Puts the panel in one of its two credential states at a
-    /// given window width and reports the frames the checks assert on. Drives layout
-    /// only — nothing here reaches the network, so it runs without a server.
-    func probePanelLayout(signedIn: Bool, contentWidth: CGFloat) -> PVEPanelLayout {
+    /// Test seams for `UICheck`: point the form at a server and read back what it shows.
+    /// Measures without touching the credential state — so a check can assert on what
+    /// some *other* call left behind, rather than on state the probe just re-imposed.
+    func probePanelLayout(contentWidth: CGFloat) -> PVEPanelLayout {
         guard let window, let contentView = window.contentView else { return .zero }
-        setSignedIn(signedIn)
         window.setContentSize(NSSize(width: contentWidth, height: 580))
         contentView.layoutSubtreeIfNeeded()
         return PVEPanelLayout(content: contentView.bounds,
-                              root: formGrid.superview?.frame ?? .zero,
-                              grid: formGrid.frame,
+                              root: outlineView.enclosingScrollView?.superview?.frame ?? .zero,
                               list: outlineView.enclosingScrollView?.frame ?? .zero,
                               filter: searchField.frame)
     }
@@ -707,25 +482,15 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
     // MARK: - Fleet state
 
     private func handleFleetStateChanged(_ state: PVEFleetState) {
-        refreshTree()
-        resolvePendingPrimaryPersist(state)
-        updatePrimaryFormState()
-        diagnoseEmptyInstancesIfNeeded(state)
-    }
-
-    /// Commits the form's typed secret to the Keychain only once the coordinator
-    /// confirms it actually works; a failure leaves whatever was already stored alone.
-    private func resolvePendingPrimaryPersist(_ state: PVEFleetState) {
-        guard let pending = pendingPrimaryPersist, let instance = state.instance(pending.id) else { return }
-        switch instance.state {
-        case .signedIn:
-            persist(profile: pending.profile, secret: pending.secret)
-            pendingPrimaryPersist = nil
-        case .failed:
-            pendingPrimaryPersist = nil
-        case .signedOut, .signingIn:
-            break
+        updateFleetSummary()
+        // Every sign-in transition, on the record. A stuck sign-in shows nothing but a
+        // spinner, and `log show --info --predicate 'subsystem == "org.spicemac.SpiceMac"'`
+        // is the difference between diagnosing one and guessing at it.
+        for instance in state.instances {
+            Self.log.info("fleet \(instance.profile.displayName, privacy: .public) -> \(Self.describe(instance.state), privacy: .public)")
         }
+        refreshTree()
+        diagnoseEmptyInstancesIfNeeded(state)
     }
 
     /// An instance that lists zero guests is ambiguous — Proxmox filters the listing
@@ -977,12 +742,6 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
         return row
     }
 
-    private func guestMatches(_ guest: PVEGuest, _ needle: String) -> Bool {
-        guest.name.lowercased().contains(needle)
-            || String(guest.vmid).contains(needle)
-            || guest.node.lowercased().contains(needle)
-    }
-
     /// Rebuilds the visible rows from `coordinator.state`, filtered by the search
     /// field. An instance is kept when its own name matches or any guest of its does;
     /// a kept instance shows only its matching guests, and is auto-expanded so the
@@ -994,31 +753,35 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
         var liveInstanceIDs: Set<UUID> = []
         var liveGuestKeys: Set<String> = []
 
+        // Every row that exists, so the caches below can be pruned against the fleet
+        // rather than against whatever the current query happens to show.
         for instance in coordinator.state.instances {
             liveInstanceIDs.insert(instance.id)
-            let row = instanceRow(for: instance)
-            let allGuestRows = instance.state.guests.map { guest -> PVEFleetGuestRow in
+            for guest in instance.state.guests {
                 liveGuestKeys.insert(guestRowKey(instanceID: instance.id, guest: guest))
-                return guestRow(for: guest, instanceID: instance.id)
             }
+        }
 
-            if needle.isEmpty {
-                newVisibleInstances.append(row)
-                newVisibleGuestRows[instance.id] = allGuestRows
-                continue
+        // The matching rule lives in PVEClient, shared with the console overlay — the two
+        // had disagreed, and this is the half that was wrong: a server matched by its own
+        // name kept only guests that also matched the name, which is none of them, so
+        // searching "Home" produced the Home row with nothing under it.
+        for match in coordinator.state.instances(matching: needle) {
+            newVisibleInstances.append(instanceRow(for: match.instance))
+            newVisibleGuestRows[match.instance.id] = match.guests.map {
+                guestRow(for: $0, instanceID: match.instance.id)
             }
-
-            let nameMatches = instance.profile.displayName.lowercased().contains(needle)
-            let matchingGuestRows = allGuestRows.filter { guestMatches($0.guest, needle) }
-            guard nameMatches || matchingGuestRows.isEmpty == false else { continue }
-            newVisibleInstances.append(row)
-            newVisibleGuestRows[instance.id] = matchingGuestRows
         }
 
         // Drop cache entries for servers/guests no longer in the fleet so a later id
         // reusing the same UUID (or vmid, on another node) can't inherit a stale row.
         instanceRowCache = instanceRowCache.filter { liveInstanceIDs.contains($0.key) }
         guestRowCache = guestRowCache.filter { liveGuestKeys.contains($0.key) }
+        // Same reason: a removed server's diagnosis would otherwise be rendered as the
+        // subtitle of whatever later takes its id, and its `diagnosedInstances` entry
+        // would suppress the new server's own diagnosis.
+        emptyListHints = emptyListHints.filter { liveInstanceIDs.contains($0.key) }
+        diagnosedInstances = diagnosedInstances.intersection(liveInstanceIDs)
 
         let previouslyKnown = knownInstanceIDs
         knownInstanceIDs = liveInstanceIDs
@@ -1159,9 +922,50 @@ final class PVEConnectWindowController: NSWindowController, NSOutlineViewDataSou
 
     // MARK: - Status
 
+    /// What the fleet as a whole is doing. Per-server state lives on the rows; this is
+    /// the at-a-glance answer to whether anything is wrong, which a window showing only
+    /// one server's line could never give.
+    ///
+    /// The spinner is fleet-wide for the same reason: bound to one server it stopped the
+    /// moment that one finished, leaving the window idle with work still running.
+    private func updateFleetSummary() {
+        let state = coordinator.state
+        emptyFleetView?.isHidden = state.instances.isEmpty == false
+        let summary = state.connectionSummary
+        fleetLabel.stringValue = summary ?? ""
+        fleetLabel.isHidden = summary == nil
+        refreshSpinner()
+    }
+
+    /// Two things want this spinner — a fleet sign-in, and a local action like starting a
+    /// guest — so neither drives it directly. Whichever finishes first would otherwise
+    /// stop it while the other was still running, or, as happened here, start it and
+    /// leave nothing to stop it at all.
+    private func refreshSpinner() {
+        let shouldSpin = isBusy || coordinator.state.isAnySigningIn
+        if shouldSpin { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
+        spinnerIsAnimating = shouldSpin
+    }
+
+    var probeFleetSummary: String? { fleetLabel.isHidden ? nil : fleetLabel.stringValue }
+    /// What the tree is showing: server name → the guest names under it.
+    func probeVisibleTree(filter: String) -> [(server: String, guests: [String])] {
+        searchField.stringValue = filter
+        refreshTree()
+        return visibleInstanceRows.map { row in
+            (row.snapshot.profile.displayName,
+             (visibleGuestRowsByInstance[row.id] ?? []).map(\.guest.name))
+        }
+    }
+    var probeEmptyStateVisible: Bool { emptyFleetView?.isHidden == false }
+    var probeSpinnerHiddenWhenStopped: Bool { spinner.isDisplayedWhenStopped == false }
+    var probeSpinnerIsAnimating: Bool { spinnerIsAnimating }
+    var probeSpinnerIsSpinningStyle: Bool { spinner.style == .spinning }
+    var probeStatusTruncates: Bool { statusLabel.lineBreakMode == .byTruncatingTail }
+
     private func setBusy(_ busy: Bool, message: String?) {
-        if busy { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
-        connectButton.isEnabled = !busy
+        isBusy = busy
+        refreshSpinner()
         if let message { showStatus(message, isError: false) }
     }
 

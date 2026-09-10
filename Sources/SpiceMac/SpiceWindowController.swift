@@ -5,6 +5,7 @@ import OSLog
 import CocoaSpice
 import SpiceController
 import DisplayScale
+import PVEClient
 
 /// Owns one SPICE session window: hosts the `SpiceDisplayView`, reflects
 /// connection state, resizes to the guest, and exposes the Connection/USB menu
@@ -15,6 +16,13 @@ final class SpiceWindowController: NSWindowController, NSWindowDelegate, NSMenuI
     private let origin: SpiceSessionOrigin
     private let displayView = SpiceDisplayView()
     private let containerView = NSView()
+    private let overlay = PVEGuestOverlay(session: .shared)
+    private let overlayEdgeTrigger = PVEOverlayEdgeTrigger()
+    /// Only for a Proxmox session — a `.vv` file has no API behind it to act through.
+    private var actionBar: PVEActionBar?
+
+    /// Picked a guest in the overlay. `AppDelegate` opens it as another tab.
+    var onOpenGuest: ((PVEGuest, PVEClient) -> Void)?
     private let statusLabel = NSTextField(labelWithString: "Connecting…")
     private let reconnectButton = NSButton(title: "Reconnect", target: nil, action: nil)
     private var cancellables = Set<AnyCancellable>()
@@ -132,8 +140,150 @@ final class SpiceWindowController: NSWindowController, NSWindowDelegate, NSMenuI
             reconnectButton.topAnchor.constraint(equalTo: statusLabel.bottomAnchor, constant: 16),
         ])
 
+        setupGuestOverlay()
+        setupActionBar()
+
         window.contentView = containerView
         window.initialFirstResponder = displayView
+    }
+
+    // MARK: - Guest overlay
+
+    /// The picker rides above the display, off the left edge until asked for. Autoresizing
+    /// rather than Auto Layout to match `displayView`: the container is resized directly on
+    /// every guest-resolution change, and mixing the two here would fight that path.
+    private func setupGuestOverlay() {
+        overlay.frame = NSRect(x: -PVEGuestOverlay.width, y: 0,
+                               width: PVEGuestOverlay.width, height: containerView.bounds.height)
+        overlay.autoresizingMask = [.height]
+        overlay.isHidden = true
+        overlay.onOpenGuest = { [weak self] guest, client in
+            self?.setGuestOverlayRevealed(false)
+            self?.onOpenGuest?(guest, client)
+        }
+        containerView.addSubview(overlay, positioned: .above, relativeTo: displayView)
+
+        // A hairline strip, not a broad hover region: this sits over a live guest, and a
+        // generous target would fire constantly while working inside the VM. The menu
+        // command is the route that carries the load.
+        overlayEdgeTrigger.frame = NSRect(x: 0, y: 0, width: 4, height: containerView.bounds.height)
+        overlayEdgeTrigger.autoresizingMask = [.height]
+        overlayEdgeTrigger.onEnter = { [weak self] in self?.setGuestOverlayRevealed(true) }
+        containerView.addSubview(overlayEdgeTrigger, positioned: .above, relativeTo: displayView)
+    }
+
+    // MARK: - Action bar
+
+    /// Top-centre, above the display, hidden until asked for. A `.vv` session gets no
+    /// bar at all: there is no authenticated client behind it to power or eject with,
+    /// and a row of controls that cannot work is worse than no row.
+    private func setupActionBar() {
+        guard case .proxmox(let source) = origin else { return }
+        let bar = PVEActionBar(guest: source.guest, client: source.client)
+        bar.onPowerAction = { [weak self] action in self?.runPowerAction(action, source: source) }
+        bar.onSetISO = { [weak self] volumeID in self?.setISO(volumeID, source: source) }
+        bar.translatesAutoresizingMaskIntoConstraints = false
+        bar.isHidden = true
+        containerView.addSubview(bar, positioned: .above, relativeTo: displayView)
+        NSLayoutConstraint.activate([
+            bar.centerXAnchor.constraint(equalTo: containerView.centerXAnchor),
+            bar.topAnchor.constraint(equalTo: containerView.topAnchor, constant: 12),
+            bar.heightAnchor.constraint(equalToConstant: PVEActionBar.height),
+        ])
+        actionBar = bar
+        bar.begin()
+    }
+
+    var isActionBarRevealed: Bool { actionBar.map { $0.isHidden == false } ?? false }
+
+    func toggleActionBar() {
+        guard let actionBar else { return }
+        actionBar.isHidden = isActionBarRevealed
+    }
+
+    private func runPowerAction(_ action: PVEPowerAction, source: PVESessionSource) {
+        if let detail = action.confirmationDetail {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "\(action.title) “\(source.guest.name)”?"
+            alert.informativeText = detail
+            alert.addButton(withTitle: action.title)
+            alert.addButton(withTitle: "Cancel")
+            guard let window else { return }
+            alert.beginSheetModal(for: window) { [weak self] response in
+                guard response == .alertFirstButtonReturn else { return }
+                self?.performPower(action, source: source)
+            }
+            return
+        }
+        performPower(action, source: source)
+    }
+
+    private func performPower(_ action: PVEPowerAction, source: PVESessionSource) {
+        Task { [weak self] in
+            do {
+                let upid = try await source.client.performPower(action, on: source.guest)
+                try await source.client.awaitTask(node: source.guest.node, upid: upid)
+            } catch {
+                self?.presentTransientError(error.localizedDescription)
+            }
+        }
+    }
+
+    private func setISO(_ volumeID: String?, source: PVESessionSource) {
+        Task { [weak self] in
+            do {
+                let upid: String
+                if let volumeID {
+                    upid = try await source.client.attachISO(volumeID, to: source.guest)
+                } else {
+                    upid = try await source.client.detachISO(from: source.guest)
+                }
+                // A synchronous config write returns no UPID; there is nothing to follow.
+                if upid.isEmpty == false {
+                    try await source.client.awaitTask(node: source.guest.node, upid: upid)
+                }
+            } catch {
+                self?.presentTransientError(error.localizedDescription)
+            }
+        }
+    }
+
+    var isGuestOverlayRevealed: Bool { overlay.isHidden == false }
+
+    func toggleGuestOverlay() { setGuestOverlayRevealed(!isGuestOverlayRevealed) }
+
+    func setGuestOverlayRevealed(_ revealed: Bool, animated: Bool = true) {
+        guard revealed != isGuestOverlayRevealed else { return }
+        let height = containerView.bounds.height
+        let shown = NSRect(x: 0, y: 0, width: PVEGuestOverlay.width, height: height)
+        let hidden = NSRect(x: -PVEGuestOverlay.width, y: 0, width: PVEGuestOverlay.width, height: height)
+
+        if revealed {
+            overlay.frame = hidden
+            overlay.isHidden = false
+            overlay.prepareForReveal()
+        }
+        let target = revealed ? shown : hidden
+        guard animated else {
+            overlay.frame = target
+            overlay.isHidden = !revealed
+            if !revealed { window?.makeFirstResponder(displayView) }
+            return
+        }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.16
+            context.allowsImplicitAnimation = true
+            overlay.animator().frame = target
+        } completionHandler: { [weak self] in
+            guard let self else { return }
+            if revealed == false {
+                self.overlay.isHidden = true
+                // Hand the keyboard back to the guest, or the next keystroke lands in a
+                // panel that is no longer on screen.
+                self.window?.makeFirstResponder(self.displayView)
+            }
+        }
     }
 
     @objc private func reconnectTapped() {

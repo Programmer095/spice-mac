@@ -8,6 +8,23 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A guest picker inside consoles (File ▸ Show Guests, ⌘L).** Switching machines
+  no longer means going back to the connect tab: a panel slides in from the left
+  with every guest across every signed-in server, filterable by name, VMID, node
+  or server, and closes as soon as one is picked. Stopped guests are listed but
+  not selectable — there is no console to open, and starting one belongs in the
+  tab. Hovering the very left edge reveals it too, but that target is four points
+  wide on purpose; over a live guest, a broader one would fire while working.
+  The connect tab stays the place a fleet is set up.
+- **A per-guest action bar (File ▸ Show Guest Actions, ⇧⌘L).** Power actions and
+  the CD-ROM for the guest in the current console, in a strip at the top.
+- **ISO attach and eject**, with the two privileges checked before the controls
+  are offered. Neither `VM.Config.CDROM` (attaching) nor `Datastore.Audit`
+  (listing images) is part of `PVEVMUser`, and both fail quietly: without the
+  former, everything else works right up to the write; without the latter Proxmox
+  returns an *empty storage list rather than a 403*, so "no images found" would be
+  a lie. SpiceMac disables the control and names the missing privilege instead.
+
 - **Connect to Proxmox natively (File ▸ Connect to Proxmox…, ⌘N).** Sign in to a
   node with an API token (or username/password) and pick a VM from a searchable
   list — no more downloading a `.vv` from the web UI for every connection. The
@@ -86,6 +103,86 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   has somewhere obvious to type; every other server is edited in the sheet.
 
 ### Fixed
+
+- **The connect panel no longer collapses to a sliver on sign-in.** Hiding the
+  credentials rows left the grid with no width, and its required width tie dragged
+  the whole panel down with it — filter field and guest tree included. It only
+  showed once a console had grown the tab group, which made it look like a width
+  problem it was not.
+
+- **A server that accepts the connection and then says nothing fails in seconds
+  instead of three silent minutes.** The network path is fine in that case, so
+  waiting for connectivity never applies and the whole resource timeout ran down —
+  measured at 180s against something listening on the port that was not Proxmox.
+  The wait before the server first answers is now bounded on its own; once it has
+  answered, a long wait is a person at the fingerprint dialog and keeps the
+  generous timeout.
+
+- **An unreachable port no longer blames the network.** With connectivity waiting
+  enabled, URLSession reports a refused connection as waiting for a network path
+  rather than as a refusal, so a wrong port or a stopped Proxmox was independently
+  indistinguishable from having no network — and the message sent people to check
+  a VPN that was working. It now names both causes.
+
+- **A blocked network fails in seconds instead of three silent minutes.** An
+  unreachable path was parked for the full resource timeout and then reported as
+  "Timed out". The wait for a network path is now bounded separately from the wait
+  at the certificate prompt — the one that legitimately involves a person — so a
+  path that is not coming gives up quickly and names the host.
+
+- **A failed sign-in no longer caches its client**, so Refresh asks for
+  credentials again rather than retrying the ones just rejected.
+
+- **Two automatic sign-ins for the same server no longer race**, each minting a
+  client. A deliberate Sign In still always goes through.
+
+- **Proxmox errors read properly wherever they surface.** `PVEError` did not
+  conform to `LocalizedError`, so any presenter using `localizedDescription`
+  showed Foundation's generic "The operation couldn't be completed."
+
+- **A removed server's empty-list diagnosis is discarded** rather than kept and
+  rendered against whatever later took its id.
+
+- **A console dragged out of the tab group can be put back.** The Window menu had
+  no Merge All Windows, Move Tab to New Window, Show Tab Bar or Show All Tabs —
+  AppKit adds the window list to a hand-built Window menu but not those — so a
+  popped-out console was one-way, with no tab bar left to drag onto. The ⌘⇧[ /
+  ⌘⇧] tab shortcuts come from the same items and now work.
+
+- **The Port field is no longer squeezed to a single digit.** It shared a row with
+  Server, whose field carries a required minimum width and takes every spare
+  point; a grid cannot wrap, so Port now has its own row.
+
+- **Signing in moved out of the connect window's form and onto the server rows.**
+  The inline credentials form was a single-server surface bolted above a fleet: it
+  folded itself away on sign-in, could not add a server at all, and duplicated the
+  fields Manage Servers owns. Adding and editing a server is now one place —
+  Manage Servers, reachable from a button in the window, ⌘, or the **Add a
+  Server…** button shown when no server is configured. Signing one in is a row
+  action, and a server with no stored secret is asked for one, as before.
+
+- **A fleet status line.** With several servers the window said only what one of
+  them was doing, so it could read "Signed in to Home" while another was
+  unreachable — that failure showed only on its own row further down. It now also
+  says "All 2 servers connected." or "1 of 2 servers connected. Rack B failed."
+
+- **Searching a server name shows that server's guests.** Filtering the tree to a
+  site matched the site but then narrowed its guests to the ones matching the same
+  text — none of them — so it produced the row with nothing under it. The tree and
+  the console picker now share one rule, which is why only one of them was wrong.
+
+- **Signing in no longer stops at the first server that works.** A server that had
+  failed was never retried, and revealing the browser signed in the fleet only
+  while nothing was signed in yet — so once one server came up, the rest could
+  never join it, and the tree gave no reason why.
+
+- **Manage Servers no longer saves a server that can never sign in.** The sheet
+  wrote whatever was on screen, so a half-filled row — a host with no token ID, or
+  a token ID like `root` missing its realm and token name — went into the fleet and
+  then sat signed-out forever, because signing in silently does nothing for an
+  incomplete profile. The failure appeared nowhere near its cause. Done now names
+  the offending server and what it is missing, in the same words the connect form
+  has always used. Rows never filled in at all are still discarded quietly.
 
 - **Password sign-ins no longer break after about two hours.** The cached login
   ticket was never re-minted, so once it expired every refresh reported a

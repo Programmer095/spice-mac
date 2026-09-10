@@ -66,13 +66,31 @@ public struct PVEServerProfile: Codable, Equatable, Identifiable, Sendable {
             && realm == other.realm
     }
 
-    public var isComplete: Bool {
-        guard host.trimmingCharacters(in: .whitespaces).isEmpty == false else { return false }
-        switch authKind {
-        case .apiToken: return tokenID.contains("@") && tokenID.contains("!")
-        case .password: return username.trimmingCharacters(in: .whitespaces).isEmpty == false
+    /// Why this profile cannot be signed in, phrased for a person — or nil when it can.
+    ///
+    /// The single source for both surfaces that edit a server. The connect form checked
+    /// this before signing in and the Manage Servers sheet did not, so the sheet could
+    /// save a half-filled row into the fleet; `signIn` then returns silently on an
+    /// incomplete profile and the row sits signed-out explaining nothing.
+    public var completenessProblem: String? {
+        if host.trimmingCharacters(in: .whitespaces).isEmpty {
+            return "Enter the Proxmox server address."
         }
+        switch authKind {
+        case .apiToken:
+            guard tokenID.contains("@"), tokenID.contains("!") else {
+                return "Enter a full API token ID, e.g. root@pam!spicemac."
+            }
+        case .password:
+            guard username.trimmingCharacters(in: .whitespaces).isEmpty == false else {
+                return "Enter a username."
+            }
+        }
+        return nil
     }
+
+    /// Derived, so the check and the message it produces cannot drift apart.
+    public var isComplete: Bool { completenessProblem == nil }
 
     public func credentials(secret: String) -> PVECredentials {
         switch authKind {

@@ -11,12 +11,20 @@ public enum PVEInstanceState: Equatable, Sendable {
         if case .signedIn(let guests) = self { return guests }
         return []
     }
+
+    public var isSignedIn: Bool { if case .signedIn = self { return true }; return false }
+    public var isFailed: Bool { if case .failed = self { return true }; return false }
 }
 
 public struct PVEInstanceSnapshot: Equatable, Identifiable, Sendable {
     public var profile: PVEServerProfile
     public var state: PVEInstanceState
     public var id: UUID { profile.id }
+
+    public init(profile: PVEServerProfile, state: PVEInstanceState) {
+        self.profile = profile
+        self.state = state
+    }
 }
 
 public enum PVEFleetEvent: Equatable, Sendable {
@@ -46,6 +54,69 @@ public struct PVEFleetState: Equatable, Sendable {
         instances.flatMap(\.state.guests)
     }
 
+    /// One line about the fleet as a whole, or nil when there is only one server and the
+    /// per-server line above already says everything.
+    ///
+    /// The window's status line describes a single server — whichever the tree has
+    /// selected. With several configured that is not enough on its own: a fleet where one
+    /// node is unreachable reads as perfectly healthy, because the failure lives only on
+    /// that node's own row further down.
+    public var connectionSummary: String? {
+        guard instances.count > 1 else { return nil }
+        let total = instances.count
+        let connected = instances.filter { $0.state.isSignedIn }.count
+        let signingIn = instances.filter { $0.state == .signingIn }.count
+        let failed = instances.filter { $0.state.isFailed }
+
+        if connected == total { return "All \(total) servers connected." }
+
+        var parts = ["\(connected) of \(total) servers connected."]
+        if signingIn > 0 { parts.append("\(signingIn) still signing in…") }
+        // Name it while there is only one to name; past that a count is more use than a
+        // list that will not fit on the line.
+        if failed.count == 1 {
+            parts.append("\(failed[0].profile.displayName) failed.")
+        } else if failed.count > 1 {
+            parts.append("\(failed.count) failed.")
+        }
+        return parts.joined(separator: " ")
+    }
+
+    /// True while any server is still signing in — the spinner belongs to the fleet, not
+    /// to whichever server the form happens to be pointed at.
+    public var isAnySigningIn: Bool {
+        instances.contains { $0.state == .signingIn }
+    }
+
+    /// Servers matching a query, each with the guests to show under it.
+    ///
+    /// A server whose *own* name or host matches keeps **all** of its guests. Filtering to
+    /// "Home" and being handed the Home row with nothing under it is useless — the reason
+    /// to search a server name is to see what is on it. Only when the server itself does
+    /// not match are its guests narrowed to the ones that do.
+    ///
+    /// A matching server with no guests is still returned: a failed or still-signing-in
+    /// server has none to show, and hiding it would be hiding the thing you searched for.
+    public func instances(matching query: String) -> [PVEFleetInstanceMatch] {
+        let needle = query.trimmingCharacters(in: .whitespaces).lowercased()
+        return instances.compactMap { instance in
+            let guests = instance.state.guests
+            if needle.isEmpty { return PVEFleetInstanceMatch(instance: instance, guests: guests) }
+            if instance.profile.matches(needle) {
+                return PVEFleetInstanceMatch(instance: instance, guests: guests)
+            }
+            let matching = guests.filter { $0.matches(needle) }
+            return matching.isEmpty ? nil : PVEFleetInstanceMatch(instance: instance, guests: matching)
+        }
+    }
+
+    /// The same rule, flattened — what a picker with no server rows shows.
+    public func guests(matching query: String) -> [PVEFleetGuestMatch] {
+        instances(matching: query).flatMap { match in
+            match.guests.map { PVEFleetGuestMatch(instance: match.instance, guest: $0) }
+        }
+    }
+
     public static func reduce(_ state: PVEFleetState, _ event: PVEFleetEvent) -> PVEFleetState {
         var next = state
         switch event {
@@ -71,5 +142,53 @@ public struct PVEFleetState: Equatable, Sendable {
     private mutating func setState(_ newState: PVEInstanceState, for id: UUID) {
         guard let index = instances.firstIndex(where: { $0.id == id }) else { return }
         instances[index].state = newState
+    }
+}
+
+
+/// A guest and the server it belongs to. Two clusters can share a node name and a VMID,
+/// so a guest alone does not identify a row.
+public struct PVEFleetGuestMatch: Equatable, Sendable, Identifiable {
+    public let instance: PVEInstanceSnapshot
+    public let guest: PVEGuest
+
+    public var id: String { "\(instance.id.uuidString)/\(guest.id)" }
+
+    public init(instance: PVEInstanceSnapshot, guest: PVEGuest) {
+        self.instance = instance
+        self.guest = guest
+    }
+}
+
+public extension PVEGuest {
+    /// `needle` is expected lowercased and trimmed.
+    func matches(_ needle: String) -> Bool {
+        needle.isEmpty
+            || name.lowercased().contains(needle)
+            || String(vmid).contains(needle)
+            || node.lowercased().contains(needle)
+    }
+}
+
+public extension PVEServerProfile {
+    /// `needle` is expected lowercased and trimmed.
+    func matches(_ needle: String) -> Bool {
+        needle.isEmpty
+            || label.lowercased().contains(needle)
+            || host.lowercased().contains(needle)
+    }
+}
+
+
+/// A server and the guests to show beneath it for a given query.
+public struct PVEFleetInstanceMatch: Equatable, Sendable, Identifiable {
+    public let instance: PVEInstanceSnapshot
+    public let guests: [PVEGuest]
+
+    public var id: UUID { instance.id }
+
+    public init(instance: PVEInstanceSnapshot, guests: [PVEGuest]) {
+        self.instance = instance
+        self.guests = guests
     }
 }
