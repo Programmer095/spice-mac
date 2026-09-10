@@ -307,22 +307,38 @@ CD-ROM for the guest you are looking at.
 The connect tab remains where a fleet is *set up* — credentials, adding and
 editing servers, the whole tree. The picker is only the selection step.
 
-#### ISO images need two privileges `PVEVMUser` does not give you
+#### Listing ISO images needs a privilege no VM role grants
 
-Attaching an ISO needs **`VM.Config.CDROM`**, and **listing** the available images
-needs **`Datastore.Audit`** on the storages. Neither is part of `PVEVMUser`.
+Attaching an ISO needs **`VM.Config.CDROM`**, which the stock `PVEVMUser` role
+already includes — so if power actions work, attaching almost certainly will too.
 
-Both fail quietly rather than loudly, which is why SpiceMac checks up front
-instead of letting the action 403:
+**Listing** the available images is the catch. That needs **`Datastore.Audit`** on
+`/storage`, and no VM role grants it: `PVEVMUser`, `PVEVMAdmin` and
+`PVETemplateUser` are all VM-scoped. A token set up for consoles has it nowhere.
 
-- Without `VM.Config.CDROM` the CD-ROM control is disabled and says so. Sign-in,
-  the guest list and the console all work perfectly, so nothing else hints at it.
-- Without `Datastore.Audit` Proxmox returns an **empty storage list rather than a
-  403**, exactly as it does for the guest list. SpiceMac reports "No storage
-  visible" and names the privilege, because "no ISO images found" would send you
-  hunting for missing files instead of a missing grant.
+It also fails quietly. Proxmox returns an **empty storage list rather than a 403**,
+exactly as it does for the guest list, so "no ISO images found" would send you
+hunting for missing files instead of a missing grant. SpiceMac reports "No storage
+visible" and names the privilege instead.
 
-Grant them on `/`, `/vms` (or `/vms/<vmid>`) and `/storage` respectively.
+Grant it read-only. `Datastore.Audit` is sufficient for both listing images **and**
+attaching them — verified against a live node, with nothing else granted on
+`/storage`:
+
+```sh
+pveum role add ISOBrowse --privs Datastore.Audit
+```
+
+```sh
+pveum acl modify /storage --tokens 'root@pam!spicemac' --roles ISOBrowse
+```
+
+The built-in `PVEDatastoreUser` also works and needs no custom role, but it is
+`Datastore.Audit` **plus** `Datastore.AllocateSpace` — the right to consume space on
+those storages, which mounting a CD-ROM never needs.
+
+If the CD-ROM control itself is disabled, the token is on a role narrower than
+`PVEVMUser`; grant `VM.Config.CDROM` on `/vms` (or `/vms/<vmid>`).
 
 ### Or open a `.vv` file
 

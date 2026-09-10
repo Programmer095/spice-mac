@@ -119,14 +119,15 @@ final class PVEActionBar: NSView {
         case nil:
             isoButton.isEnabled = false
         case false:
-            // Say which privilege and where it comes from. "Permission denied" after the
-            // fact sends people looking at the wrong thing — sign-in worked, the console
-            // works, and the role looks right until you know CDROM is not in it.
+            // Name the privilege and say it is unusual to be missing. The stock PVEVMUser
+            // role does include VM.Config.CDROM, so a token without it is on a narrower
+            // role — worth saying, or the reader goes looking for a grant they may
+            // already have.
             isoButton.isEnabled = false
             isoButton.toolTip = """
-                This token cannot change the CD-ROM. VM.Config.CDROM is not part of the \
-                PVEVMUser role and has to be granted to the token explicitly, on / , /vms \
-                or /vms/\(guest.vmid).
+                This token cannot change the CD-ROM. It needs VM.Config.CDROM on \
+                /vms/\(guest.vmid) (or /vms, or /). The stock PVEVMUser role includes that \
+                privilege, so this token is on a narrower role.
                 """
         case true?:
             isoButton.isEnabled = true

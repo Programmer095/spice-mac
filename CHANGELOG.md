@@ -18,12 +18,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The connect tab stays the place a fleet is set up.
 - **A per-guest action bar (File ▸ Show Guest Actions, ⇧⌘L).** Power actions and
   the CD-ROM for the guest in the current console, in a strip at the top.
-- **ISO attach and eject**, with the two privileges checked before the controls
-  are offered. Neither `VM.Config.CDROM` (attaching) nor `Datastore.Audit`
-  (listing images) is part of `PVEVMUser`, and both fail quietly: without the
-  former, everything else works right up to the write; without the latter Proxmox
-  returns an *empty storage list rather than a 403*, so "no images found" would be
-  a lie. SpiceMac disables the control and names the missing privilege instead.
+- **ISO attach and eject**, with the privileges checked before the controls are
+  offered. Attaching needs `VM.Config.CDROM`, which the stock `PVEVMUser` role
+  already includes. **Listing** the images needs `Datastore.Audit` on `/storage`,
+  which no VM role grants — and Proxmox reports that shortfall as an *empty storage
+  list rather than a 403*, so "no images found" would be a lie. SpiceMac says which
+  privilege is missing instead. `Datastore.Audit` on its own covers both listing and
+  attaching, so the read-only grant is enough.
 
 - **Connect to Proxmox natively (File ▸ Connect to Proxmox…, ⌘N).** Sign in to a
   node with an API token (or username/password) and pick a VM from a searchable

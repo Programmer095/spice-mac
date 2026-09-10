@@ -14,6 +14,17 @@ final class Box<Value>: @unchecked Sendable {
         get { lock.lock(); defer { lock.unlock() }; return stored }
         set { lock.lock(); stored = newValue; lock.unlock() }
     }
+
+    /// Read-modify-write under one lock.
+    ///
+    /// `box.value += 1` is not atomic even with a locked getter and setter: it takes the
+    /// lock to read, drops it, then takes it again to write. Two sign-ins landing at once
+    /// interleave there and one increment is lost — which made the re-entrancy checks
+    /// fail about one run in six.
+    func mutate(_ change: (inout Value) -> Void) {
+        lock.lock(); defer { lock.unlock() }
+        change(&stored)
+    }
 }
 
 /// A finished profile, handed over as a `let`.
@@ -904,7 +915,7 @@ t.test("signing in twice does not start the work twice") {
         let coordinator = PVEFleetCoordinator(trustDelegate: nil,
                                               secretProvider: { _ in "s" },
                                               loadGuests: { _ in
-                                                  attempts.value += 1
+                                                  attempts.mutate { $0 += 1 }
                                                   try? await Task.sleep(nanoseconds: 200_000_000)
                                                   return [sampleGuest]
                                               })
@@ -931,7 +942,7 @@ t.test("an explicitly typed secret still gets through while a sign-in is in flig
         let coordinator = PVEFleetCoordinator(trustDelegate: nil,
                                               secretProvider: { _ in "stored" },
                                               loadGuests: { _ in
-                                                  attempts.value += 1
+                                                  attempts.mutate { $0 += 1 }
                                                   return [sampleGuest]
                                               })
         coordinator.setProfiles([profile])
@@ -1035,15 +1046,39 @@ t.test("a privilege present but zero is not granted") {
              "a privilege reported as 0 is a denial, not a grant")
 }
 
-t.test("PVEVMUser does not include VM.Config.CDROM") {
-    // The trap this check exists for: a token with the stock role signs in, lists
-    // guests, and looks healthy right up to the point an ISO attach 403s.
-    let pveVMUser = ["/vms/100": ["VM.Audit": 1, "VM.Config.Disk": 1, "VM.Config.CDROM": 0,
-                                  "VM.Console": 1, "VM.PowerMgmt": 1]]
-    t.expect(PVEProtocol.grants("VM.PowerMgmt", forVMID: 100, in: pveVMUser),
+/// The stock role's actual privilege set, from `pveum role list` on Proxmox 8:
+///
+///     PVEVMUser  VM.Audit, VM.Backup, VM.Config.CDROM, VM.Config.Cloudinit,
+///                VM.Console, VM.PowerMgmt
+///
+/// Written down because it was previously guessed at, and guessed wrong: the app told
+/// people VM.Config.CDROM had to be granted separately when the stock role already had
+/// it, and pointed them away from the privilege actually missing.
+let pveVMUserPrivileges = ["VM.Audit", "VM.Backup", "VM.Config.CDROM",
+                           "VM.Config.Cloudinit", "VM.Console", "VM.PowerMgmt"]
+
+t.test("a token with the stock PVEVMUser role may change a CD-ROM") {
+    let acl = ["/vms/100": Dictionary(uniqueKeysWithValues: pveVMUserPrivileges.map { ($0, 1) })]
+    t.expect(PVEProtocol.grants("VM.Config.CDROM", forVMID: 100, in: acl),
+             "PVEVMUser includes VM.Config.CDROM, so the control must be offered")
+    t.expect(PVEProtocol.grants("VM.PowerMgmt", forVMID: 100, in: acl),
              "power actions are in the role and must stay offered")
-    t.expect(PVEProtocol.grants("VM.Config.CDROM", forVMID: 100, in: pveVMUser) == false,
-             "ISO must not be offered to a stock PVEVMUser token")
+}
+
+t.test("no VM role grants the privilege that lists ISO images") {
+    // The real trap. Datastore.Audit lives on /storage, and every VM role is VM-scoped,
+    // so a token set up for consoles has it nowhere — and Proxmox reports the shortfall
+    // as an empty storage list rather than a 403.
+    let acl = ["/vms/100": Dictionary(uniqueKeysWithValues: pveVMUserPrivileges.map { ($0, 1) })]
+    t.expect(PVEProtocol.grants("Datastore.Audit", forVMID: 100, in: acl) == false,
+             "Datastore.Audit is not a VM privilege and must not appear to be one")
+}
+
+t.test("a privilege the role does not hold is not granted") {
+    // PVEVMUser is not VMAdmin: disk config is not in it.
+    let acl = ["/vms/100": Dictionary(uniqueKeysWithValues: pveVMUserPrivileges.map { ($0, 1) })]
+    t.expect(PVEProtocol.grants("VM.Config.Disk", forVMID: 100, in: acl) == false,
+             "VM.Config.Disk belongs to PVEVMAdmin, not PVEVMUser")
 }
 
 // MARK: - ISO attach and detach
@@ -1201,7 +1236,7 @@ t.test("signing in the fleet retries a server that failed, not just untouched on
         let coordinator = PVEFleetCoordinator(trustDelegate: nil,
                                               secretProvider: { _ in "s" },
                                               loadGuests: { client in
-                                                  attempts.value += 1
+                                                  attempts.mutate { $0 += 1 }
                                                   // 10.0.0.1 fails on the first pass, then works.
                                                   if client.server.host == "10.0.0.1", attempts.value <= 2 {
                                                       throw PVEError.unauthorized
@@ -1239,7 +1274,7 @@ t.test("signing in the fleet leaves an already signed-in server alone") {
         let coordinator = PVEFleetCoordinator(trustDelegate: nil,
                                               secretProvider: { _ in "s" },
                                               loadGuests: { _ in
-                                                  attempts.value += 1
+                                                  attempts.mutate { $0 += 1 }
                                                   return [sampleGuest]
                                               })
         coordinator.setProfiles([a])
