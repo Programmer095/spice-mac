@@ -16,6 +16,17 @@ final class Box<Value>: @unchecked Sendable {
     }
 }
 
+/// A finished profile, handed over as a `let`.
+///
+/// A `var` captured by a `Task` is an error on the Swift 5.10 toolchain CI builds with,
+/// even though 6.x accepts it — so these read fine locally and did not compile there.
+/// None of these tests mutates the profile after building it, so there was never a reason
+/// for it to be a `var`.
+func signInProfile(host: String, port: Int = 8006, rememberSecret: Bool = true) -> PVEServerProfile {
+    PVEServerProfile(label: "Home", host: host, port: port,
+                     tokenID: "root@pam!spicemac", rememberSecret: rememberSecret)
+}
+
 /// Waits for `@MainActor` work by draining the main run loop rather than blocking on
 /// it. `DispatchSemaphore.wait` on the main thread occupies the very executor the work
 /// is queued on, so the work never starts and the assertion that follows passes
@@ -513,8 +524,7 @@ t.test("signIn(usingSecret:) never touches the secret provider") {
     let providerCalled = Flag()
     // A host that cannot form a URL: the sign-in settles on .invalidServer without
     // ever touching the network, which keeps the check deterministic and instant.
-    var profile = PVEServerProfile(label: "Home", host: "pve lan")
-    profile.tokenID = "root@pam!spicemac"
+    let profile = signInProfile(host: "pve lan")
     let id = profile.id
     let settled = Box<PVEInstanceState?>(nil)
     // signIn's async half holds the coordinator weakly, so a local would be gone
@@ -697,9 +707,7 @@ t.test("pinning and pin lookup pass through the queue wrapper unblocked") {
 // MARK: - Missing secrets
 
 t.test("no stored secret and no prompt reports the server, not rejected credentials") {
-    var profile = PVEServerProfile(label: "Home", host: "127.0.0.1", port: 1)
-    profile.tokenID = "root@pam!spicemac"
-    profile.rememberSecret = false
+    let profile = signInProfile(host: "127.0.0.1", port: 1, rememberSecret: false)
     let id = profile.id
     let box = Box<PVEInstanceState?>(nil)
     let live = Box<AnyObject?>(nil)
@@ -719,9 +727,7 @@ t.test("no stored secret and no prompt reports the server, not rejected credenti
 }
 
 t.test("a server with no stored secret is offered to the prompt instead of failing") {
-    var profile = PVEServerProfile(label: "Home", host: "127.0.0.1", port: 1)
-    profile.tokenID = "root@pam!spicemac"
-    profile.rememberSecret = false
+    let profile = signInProfile(host: "127.0.0.1", port: 1, rememberSecret: false)
     let id = profile.id
     let asked = Box<Bool>(false)
     let live = Box<AnyObject?>(nil)
@@ -741,8 +747,7 @@ t.test("a server with no stored secret is offered to the prompt instead of faili
 t.test("a stored secret is used without troubling the prompt") {
     // Unusable as a URL on purpose — the sign-in settles on .invalidServer rather than
     // waiting on a socket, and the secret decision has already been made by then.
-    var profile = PVEServerProfile(label: "Home", host: "pve lan")
-    profile.tokenID = "root@pam!spicemac"
+    let profile = signInProfile(host: "pve lan")
     let id = profile.id
     let asked = Box<Bool>(false)
     let settled = Box<PVEInstanceState?>(nil)
@@ -768,8 +773,7 @@ t.test("a stored secret is used without troubling the prompt") {
 // MARK: - Editing a signed-in profile
 
 t.test("editing where a signed-in server points signs it out") {
-    var profile = PVEServerProfile(label: "Home", host: "127.0.0.1", port: 1)
-    profile.tokenID = "root@pam!spicemac"
+    let profile = signInProfile(host: "127.0.0.1", port: 1)
     let id = profile.id
     let box = Box<PVEInstanceState?>(nil)
     let host = Box<String?>(nil)
@@ -792,8 +796,7 @@ t.test("editing where a signed-in server points signs it out") {
 }
 
 t.test("a cosmetic edit leaves a signed-in server alone") {
-    var profile = PVEServerProfile(label: "Home", host: "127.0.0.1", port: 1)
-    profile.tokenID = "root@pam!spicemac"
+    let profile = signInProfile(host: "127.0.0.1", port: 1)
     let id = profile.id
     let label = Box<String?>(nil)
     let state = Box<PVEInstanceState?>(nil)
