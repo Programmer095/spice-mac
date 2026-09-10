@@ -15,12 +15,14 @@ on:
 jobs:
   swift-tests:
     name: Pure-Swift checks
-    runs-on: macos-14
+    runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Show toolchain
-        run: swift --version
+        run: |
+          swift --version
+          xcodebuild -version || true
 
       - name: VVConfig — .vv parser checks
         working-directory: Packages/VVConfig
@@ -45,6 +47,6 @@ jobs:
     name: shellcheck
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: shellcheck scripts
         run: shellcheck --severity=warning -x scripts/*.sh
