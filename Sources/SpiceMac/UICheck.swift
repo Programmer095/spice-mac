@@ -151,8 +151,8 @@ enum UICheck {
         }
     }
 
-    /// The bar offers exactly what the token can actually do. VM.Config.CDROM is not in
-    /// PVEVMUser, so an ungated ISO control would 403 long after sign-in looked fine.
+    /// The bar offers exactly what the token can actually do. A narrower-than-stock role
+    /// fails only at the config write, long after sign-in looked fine.
     private static func checkActionBar(snapshotDirectory: String?) {
         let running = guest(100, "Netbird-router", "virtual1", "running")
         let client = PVEClient(server: PVEServer(host: "10.0.0.1", port: 8006),
@@ -173,7 +173,10 @@ enum UICheck {
         expect(bar.isISOControlEnabled == false, "a token without VM.Config.CDROM must not be offered ISO actions")
         let explanation = bar.isoControlExplanation ?? ""
         expect(explanation.contains("VM.Config.CDROM"), "the explanation must name the missing privilege, got: “\(explanation)”")
-        expect(explanation.contains("PVEVMUser"), "the explanation must say the stock role does not include it")
+        expect(explanation.contains("PVEVMUser"),
+               "the explanation should say the stock role has this privilege, so the reader knows the token is on a narrower one")
+        expect(explanation.contains("not part of") == false,
+               "the explanation must not claim the stock role lacks VM.Config.CDROM — it has it")
 
         // Granted: enabled, images listed by filename, and always a way to eject.
         let images = [PVEISOImage(volumeID: "local:iso/debian-12.iso", storage: "local"),

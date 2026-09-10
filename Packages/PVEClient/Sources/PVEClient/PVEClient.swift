@@ -143,10 +143,13 @@ public final class PVEClient {
 
     /// Whether this token may change `guest`'s CD-ROM.
     ///
-    /// Worth asking before offering the action: `VM.Config.CDROM` is **not** in
-    /// `PVEVMUser`, so the common token signs in, lists guests and drives consoles
-    /// perfectly, and only fails when an ISO is attached. Offering a control that
-    /// cannot work and explaining why beats a 403 after the fact.
+    /// The stock `PVEVMUser` role *does* include `VM.Config.CDROM` — verified against
+    /// `pveum role list` — so most tokens pass this. It is still asked rather than
+    /// assumed: a narrower custom role fails only at the config write, long after
+    /// sign-in, the guest list and the console have all worked perfectly.
+    ///
+    /// Being allowed to change the CD-ROM says nothing about being able to *see* the
+    /// images: that needs `Datastore.Audit` on `/storage`, which no VM role grants.
     public func canConfigureCDROM(for guest: PVEGuest) async -> Bool {
         guard let permissions = try? await permissions() else { return false }
         return PVEProtocol.grants("VM.Config.CDROM", forVMID: guest.vmid, in: permissions)
